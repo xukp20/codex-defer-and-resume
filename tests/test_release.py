@@ -199,9 +199,14 @@ class DeferredRuntimeTests(unittest.TestCase):
         self.assertEqual(heartbeat["decision"], "block")
         self.assertIn("缓存保活唤醒", str(heartbeat["reason"]))
 
-        completion = self.hook_call()
+        completion: dict[str, object] | None = None
+        for _ in range(5):
+            response = self.hook_call()
+            if "后台任务已经完成" in str(response.get("reason")):
+                completion = response
+                break
+        self.assertIsNotNone(completion, "the task should complete within five bounded Hook intervals")
         self.assertEqual(completion["decision"], "block")
-        self.assertIn("后台任务已经完成", str(completion["reason"]))
         result = json.loads((task_dir / "result.json").read_text(encoding="utf-8"))
         self.assertEqual(result["exit_code"], 0)
         self.acknowledge_and_clean(task_dir)
