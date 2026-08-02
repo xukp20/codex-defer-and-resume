@@ -1,0 +1,4 @@
+interface:
+  display_name: "Defer and Resume"
+  short_description: "Wait for long-running work without model polling"
+  default_prompt: "Use $defer-and-resume to run or monitor long-running work and resume this task when it finishes."
