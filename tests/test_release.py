@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -197,12 +198,12 @@ class DeferredRuntimeTests(unittest.TestCase):
         task_dir = self.start_task("0.2")
         heartbeat = self.hook_call()
         self.assertEqual(heartbeat["decision"], "block")
-        self.assertIn("缓存保活唤醒", str(heartbeat["reason"]))
+        self.assertIn("Cache keepalive wake", str(heartbeat["reason"]))
 
         completion: dict[str, object] | None = None
         for _ in range(5):
             response = self.hook_call()
-            if "后台任务已经完成" in str(response.get("reason")):
+            if "Deferred work has completed" in str(response.get("reason")):
                 completion = response
                 break
         self.assertIsNotNone(completion, "the task should complete within five bounded Hook intervals")
@@ -214,12 +215,12 @@ class DeferredRuntimeTests(unittest.TestCase):
     def test_unacknowledged_completion_is_retried(self) -> None:
         task_dir = self.start_task("0.01")
         first = self.hook_call()
-        self.assertIn("后台任务已经完成", str(first["reason"]))
+        self.assertIn("Deferred work has completed", str(first["reason"]))
         first_wake = json.loads((task_dir / "wake.json").read_text(encoding="utf-8"))
         self.assertEqual(first_wake["attempt"], 1)
 
         second = self.hook_call()
-        self.assertIn("后台任务已经完成", str(second["reason"]))
+        self.assertIn("Deferred work has completed", str(second["reason"]))
         second_wake = json.loads((task_dir / "wake.json").read_text(encoding="utf-8"))
         self.assertEqual(second_wake["attempt"], 2)
         self.acknowledge_and_clean(task_dir)
@@ -227,7 +228,7 @@ class DeferredRuntimeTests(unittest.TestCase):
     def test_timeout_exit_code(self) -> None:
         task_dir = self.start_task("0.3", timeout="0.05")
         completion = self.hook_call()
-        self.assertIn("退出码 124", str(completion["reason"]))
+        self.assertIn("exit code 124", str(completion["reason"]))
         result = json.loads((task_dir / "result.json").read_text(encoding="utf-8"))
         self.assertTrue(result["timed_out"])
         self.acknowledge_and_clean(task_dir)
@@ -241,6 +242,17 @@ class SkillMetadataTests(unittest.TestCase):
         self.assertIn("\ndescription:", skill)
         interface = (SKILL_SOURCE / "agents" / "openai.yaml").read_text(encoding="utf-8")
         self.assertIn('display_name: "Defer and Resume"', interface)
+
+    def test_public_text_contains_no_cjk_characters(self) -> None:
+        cjk = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+        text_suffixes = {".md", ".py", ".yaml", ".yml", ".json", ".toml", ".txt"}
+        violations: list[str] = []
+        for path in REPOSITORY_ROOT.rglob("*"):
+            if not path.is_file() or ".git" in path.parts or path.suffix not in text_suffixes:
+                continue
+            if cjk.search(path.read_text(encoding="utf-8")):
+                violations.append(str(path.relative_to(REPOSITORY_ROOT)))
+        self.assertEqual(violations, [], f"public text must remain English-only: {violations}")
 
 
 if __name__ == "__main__":

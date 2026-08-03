@@ -171,13 +171,14 @@ def emit_completion(tasks: list[Path]) -> None:
             },
         )
         summaries.append(
-            f"{metadata.get('name', task.name)} 已完成，退出码 {result.get('exit_code')}，任务目录：{task}"
+            f"{metadata.get('name', task.name)} completed with exit code {result.get('exit_code')}; "
+            f"task directory: {task}"
         )
     emit(
         {
             "decision": "block",
-            "reason": "后台任务已经完成。请先读取 result.json 和必要的 output.log，"
-            "然后执行 defer.py ack；记录证据后再执行 defer.py clean。\n"
+            "reason": "Deferred work has completed. Read result.json and only the necessary portion of "
+            "output.log, then run defer.py ack. After recording evidence, run defer.py clean.\n"
             + "\n".join(summaries),
         }
     )
@@ -216,10 +217,11 @@ def main() -> int:
             emit(
                 {
                     "decision": "block",
-                    "reason": "缓存保活唤醒：后台任务仍在运行："
+                    "reason": "Cache keepalive wake: deferred work is still running: "
                     + ", ".join(map(str, names))
-                    + "。不要轮询、检查日志或调用状态命令；请立即用最短响应结束本轮，"
-                    + "让 Stop Hook 继续等待。此唤醒仅用于避免当前任务长时间无模型交互。",
+                    + ". Do not poll, inspect logs, or call status commands. End this turn immediately "
+                    + "with the shortest useful response so the Stop Hook can continue waiting. This "
+                    + "wake only prevents prolonged model inactivity in the current task.",
                 }
             )
             return 0

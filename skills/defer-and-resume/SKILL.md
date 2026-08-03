@@ -33,7 +33,7 @@ Then finish the current turn. Do not poll with model tool calls. Keep Codex Desk
 
 ## Handle Hook prompts
 
-For a `缓存保活唤醒` prompt, do not inspect, poll, or call tools. Immediately finish the turn with the shortest useful response so the Stop Hook continues local waiting.
+For a `Cache keepalive wake` prompt, do not inspect, poll, or call tools. Immediately finish the turn with the shortest useful response so the Stop Hook continues local waiting.
 
 For a completion prompt:
 
