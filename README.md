@@ -2,7 +2,7 @@
 
 Run long-lived commands without model polling, periodically preserve prompt-cache locality, and resume the same Codex task when work completes.
 
-`defer-and-resume` is a service-independent Codex Skill plus a Stop Hook. The agent decides which command represents terminal completion; the implementation only watches that command and wakes the same task when it exits.
+`defer-and-resume` is a service-independent Codex Skill plus lifecycle Hooks. The agent decides which command represents terminal completion; the implementation only watches that command and wakes the same task when it exits.
 
 > [!IMPORTANT]
 > This is an unofficial, experimental Codex extension. Prompt-cache behavior is provider-specific, and process completion is not proof that a wider deployment or business workflow succeeded.
@@ -23,7 +23,7 @@ the command writes result.json
 the Hook resumes the same Codex task
 ```
 
-While a command is still running, the Hook performs a short cache-keepalive wake every 25 minutes by default. The agent immediately ends that turn and the same registration automatically re-enters local waiting on the continuation turn; no second `start` call is needed. Completion is a one-shot wake. If a user interrupts the waiting turn, the registration is disarmed and is not silently resumed on the next user turn. The interval is a provider-specific heuristic, not an OpenAI guarantee.
+While a command is still running, the Stop Hook performs a short cache-keepalive wake every 25 minutes by default. The agent immediately ends that turn and the same registration automatically re-enters local waiting on the continuation turn; no second `start` call is needed. A synchronous `UserPromptSubmit` Hook disarms the registration as soon as a new user message arrives, while leaving the worker running. The Stop Hook retains a fallback disarm path for interrupted or stale waits. Completion is a one-shot wake. The interval is a provider-specific heuristic, not an OpenAI guarantee.
 
 ## Requirements
 
@@ -43,7 +43,7 @@ python3 install.py
 The installer:
 
 - copies the Skill to `${CODEX_HOME:-~/.codex}/skills/defer-and-resume`;
-- merges one Stop Hook into `${CODEX_HOME:-~/.codex}/hooks.json`;
+- merges one Stop Hook and one `UserPromptSubmit` Hook into `${CODEX_HOME:-~/.codex}/hooks.json`;
 - preserves unrelated hooks;
 - replaces older `defer-and-resume` hook entries instead of duplicating them;
 - backs up an existing installed Skill and Hook configuration before replacement.
@@ -108,7 +108,7 @@ Environment variables are read by the runner or Stop Hook:
 
 Keep the cache-keepalive interval below the cache horizon measured for your provider. Lower values cause more model calls; higher values increase the risk of a cold prompt.
 
-The Hook uses the `stop_hook_active` field supplied by Codex to distinguish an automatic continuation from a new user turn. A normal continuation keeps the registration armed; a manually interrupted turn disarms it. There is no retry loop for a delivered completion wake.
+The Stop Hook uses the `stop_hook_active` field supplied by Codex to distinguish an automatic continuation from a new user turn. The `UserPromptSubmit` Hook handles the immediate user-input path and disarms active registrations before the new prompt is processed. A normal continuation keeps the registration armed; the worker is never cancelled by an interrupt unless the agent explicitly runs `cancel`. There is no retry loop for a delivered completion wake.
 
 ## Update
 
@@ -147,7 +147,9 @@ intentionally abandoning incomplete work. Runtime evidence is retained unless
 ```bash
 python3 -m unittest discover -s tests -v
 python3 -m py_compile skills/defer-and-resume/scripts/defer.py \
-  skills/defer-and-resume/scripts/stop_hook.py install.py uninstall.py
+  skills/defer-and-resume/scripts/stop_hook.py \
+  skills/defer-and-resume/scripts/user_prompt_hook.py \
+  install.py uninstall.py
 ```
 
 The Codex Skill validator can additionally validate `skills/defer-and-resume` when `PyYAML` is available.

@@ -61,6 +61,11 @@ For a completion prompt:
    python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" clean --task-dir <path>
    ```
 
+When a user sends a new message or interrupts a waiting turn, the synchronous
+`UserPromptSubmit` Hook disarms the registration before the new prompt is
+processed. It does not cancel the worker. The Stop Hook also disarms stale
+`waiting` state on the next non-continuation invocation as a fallback.
+
 ## Operations
 
 ```bash
@@ -99,3 +104,4 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" g
 
 - `scripts/defer.py`: start, inspect, list, status, cancel, acknowledge, clean, and garbage-collect generic tasks.
 - `scripts/stop_hook.py`: wait for current-task registrations, issue periodic cache keepalives, detect stale workers, and deliver one-shot completion wakes.
+- `scripts/user_prompt_hook.py`: disarm active waits when a new user prompt arrives, without cancelling workers.

@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -77,7 +78,18 @@ class InstallerTests(unittest.TestCase):
                                 }
                             ]
                         }
-                    ]
+                    ],
+                    "UserPromptSubmit": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "/usr/bin/true",
+                                    "statusMessage": "unrelated prompt",
+                                }
+                            ]
+                        }
+                    ],
                 },
             }
             (codex_home / "hooks.json").write_text(json.dumps(existing), encoding="utf-8")
@@ -90,15 +102,36 @@ class InstallerTests(unittest.TestCase):
             self.assertFalse(any(installed_skill.rglob("__pycache__")))
             self.assertFalse(any(installed_skill.rglob("*.pyc")))
             config = json.loads((codex_home / "hooks.json").read_text(encoding="utf-8"))
-            hook_entries = [
+            stop_hook_entries = [
                 hook
                 for group in config["hooks"]["Stop"]
                 for hook in group.get("hooks", [])
             ]
-            defer_hooks = [hook for hook in hook_entries if "defer-and-resume" in hook.get("command", "")]
-            self.assertEqual(len(defer_hooks), 1)
-            self.assertIn("'", defer_hooks[0]["command"], "a path containing spaces must be shell-quoted")
-            self.assertTrue(any(hook.get("statusMessage") == "unrelated" for hook in hook_entries))
+            user_prompt_hook_entries = [
+                hook
+                for group in config["hooks"]["UserPromptSubmit"]
+                for hook in group.get("hooks", [])
+            ]
+            defer_stop_hooks = [
+                hook for hook in stop_hook_entries if "defer-and-resume" in hook.get("command", "")
+            ]
+            defer_user_prompt_hooks = [
+                hook for hook in user_prompt_hook_entries if "defer-and-resume" in hook.get("command", "")
+            ]
+            self.assertEqual(len(defer_stop_hooks), 1)
+            self.assertEqual(len(defer_user_prompt_hooks), 1)
+            self.assertIn(
+                "'", defer_stop_hooks[0]["command"], "a path containing spaces must be shell-quoted"
+            )
+            self.assertIn(
+                "'",
+                defer_user_prompt_hooks[0]["command"],
+                "a path containing spaces must be shell-quoted",
+            )
+            self.assertTrue(any(hook.get("statusMessage") == "unrelated" for hook in stop_hook_entries))
+            self.assertTrue(
+                any(hook.get("statusMessage") == "unrelated prompt" for hook in user_prompt_hook_entries)
+            )
             self.assertTrue(list(codex_home.glob("hooks.json.backup-*")))
             self.assertTrue(list((codex_home / "backups" / "defer-and-resume").iterdir()))
 
@@ -111,6 +144,14 @@ class InstallerTests(unittest.TestCase):
                 for hook in group.get("hooks", [])
             ]
             self.assertEqual([hook.get("statusMessage") for hook in remaining], ["unrelated"])
+            remaining_user_prompt = [
+                hook
+                for group in config["hooks"]["UserPromptSubmit"]
+                for hook in group.get("hooks", [])
+            ]
+            self.assertEqual(
+                [hook.get("statusMessage") for hook in remaining_user_prompt], ["unrelated prompt"]
+            )
 
     def test_uninstall_refuses_incomplete_runtime_but_accepts_completed_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -154,6 +195,9 @@ class DeferredRuntimeTests(unittest.TestCase):
         run(sys.executable, str(INSTALLER), "--codex-home", str(self.codex_home))
         self.defer = self.codex_home / "skills" / "defer-and-resume" / "scripts" / "defer.py"
         self.hook = self.codex_home / "skills" / "defer-and-resume" / "scripts" / "stop_hook.py"
+        self.user_prompt_hook = (
+            self.codex_home / "skills" / "defer-and-resume" / "scripts" / "user_prompt_hook.py"
+        )
         self.environment = os.environ.copy()
         self.environment.update(
             {
@@ -192,6 +236,15 @@ class DeferredRuntimeTests(unittest.TestCase):
             str(self.hook),
             env=self.environment,
             input_text=json.dumps({"stop_hook_active": continuing}),
+        )
+        return json.loads(completed.stdout)
+
+    def user_prompt_hook_call(self) -> dict[str, object]:
+        completed = run(
+            sys.executable,
+            str(self.user_prompt_hook),
+            env=self.environment,
+            input_text=json.dumps({"session_id": "test-thread"}),
         )
         return json.loads(completed.stdout)
 
@@ -286,6 +339,61 @@ class DeferredRuntimeTests(unittest.TestCase):
         self.assertEqual(interrupted, {"continue": True})
         wait = json.loads((task_dir / "wait.json").read_text(encoding="utf-8"))
         self.assertEqual(wait["state"], "disarmed")
+        run(sys.executable, str(self.defer), "cancel", "--task-dir", str(task_dir), env=self.environment)
+        self.acknowledge_and_clean(task_dir)
+
+    def test_user_prompt_disarms_keepalive_without_cancelling_worker(self) -> None:
+        task_dir = self.start_task("2")
+        heartbeat = self.hook_call()
+        self.assertEqual(heartbeat["decision"], "block")
+        self.assertIn("Cache keepalive wake", str(heartbeat["reason"]))
+
+        worker_pid = int(json.loads((task_dir / "worker.json").read_text(encoding="utf-8"))["pid"])
+        self.assertEqual(self.user_prompt_hook_call(), {"continue": True})
+        wait = json.loads((task_dir / "wait.json").read_text(encoding="utf-8"))
+        self.assertEqual(wait["state"], "disarmed")
+        self.assertEqual(wait["disarm_reason"], "user prompt interrupted wait")
+        os.kill(worker_pid, 0)
+
+        run(sys.executable, str(self.defer), "cancel", "--task-dir", str(task_dir), env=self.environment)
+        self.acknowledge_and_clean(task_dir)
+
+    def test_user_prompt_recovers_a_killed_stop_hook(self) -> None:
+        task_dir = self.start_task("2")
+        self.environment["CODEX_DEFER_KEEPALIVE_SECONDS"] = "10"
+        hook_process = subprocess.Popen(
+            [sys.executable, str(self.hook)],
+            cwd=REPOSITORY_ROOT,
+            env=self.environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert hook_process.stdin is not None
+        hook_process.stdin.write(json.dumps({"stop_hook_active": False}))
+        hook_process.stdin.close()
+        for _ in range(100):
+            wait = json.loads((task_dir / "wait.json").read_text(encoding="utf-8"))
+            if wait["state"] == "waiting":
+                break
+            if hook_process.poll() is not None:
+                self.fail(f"Stop Hook exited before entering wait: {hook_process.returncode}")
+            time.sleep(0.01)
+        else:
+            self.fail("Stop Hook did not enter waiting state")
+
+        hook_process.kill()
+        hook_process.wait(timeout=5)
+        assert hook_process.stdout is not None
+        assert hook_process.stderr is not None
+        hook_process.stdout.close()
+        hook_process.stderr.close()
+        self.assertEqual(self.user_prompt_hook_call(), {"continue": True})
+        wait = json.loads((task_dir / "wait.json").read_text(encoding="utf-8"))
+        self.assertEqual(wait["state"], "disarmed")
+        self.assertEqual(wait["disarm_reason"], "user prompt interrupted wait")
+
         run(sys.executable, str(self.defer), "cancel", "--task-dir", str(task_dir), env=self.environment)
         self.acknowledge_and_clean(task_dir)
 

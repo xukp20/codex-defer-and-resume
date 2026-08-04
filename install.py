@@ -15,6 +15,7 @@ from typing import Any
 
 SKILL_NAME = "defer-and-resume"
 HOOK_STATUS = "Waiting for deferred work with one-shot cache keepalive"
+USER_PROMPT_HOOK_STATUS = "Disarming deferred waits on user input"
 
 
 def timestamp() -> str:
@@ -51,8 +52,10 @@ def is_defer_hook(hook: Any) -> bool:
     return hook.get("statusMessage") in {
         HOOK_STATUS,
         "Waiting for deferred work with periodic cache keepalive",
+        USER_PROMPT_HOOK_STATUS,
     } or (
-        "defer-and-resume" in command and command.endswith("stop_hook.py")
+        "defer-and-resume" in command
+        and command.endswith(("stop_hook.py", "user_prompt_hook.py"))
     )
 
 
@@ -93,7 +96,11 @@ def install_skill(source: Path, destination: Path, backup_root: Path) -> Path | 
     return backup
 
 
-def install_hook(codex_home: Path, script_path: Path) -> Path | None:
+def install_hook(
+    codex_home: Path,
+    stop_script_path: Path,
+    user_prompt_script_path: Path,
+) -> Path | None:
     hooks_path = codex_home / "hooks.json"
     config = read_object(hooks_path)
     backup: Path | None = None
@@ -110,13 +117,14 @@ def install_hook(codex_home: Path, script_path: Path) -> Path | None:
         raise SystemExit(f"{hooks_path}: 'hooks' must be a JSON object")
 
     stop_groups = remove_existing_hook_groups(hooks.get("Stop", []))
-    command = f"/usr/bin/env python3 {shlex.quote(str(script_path))}"
+    user_prompt_groups = remove_existing_hook_groups(hooks.get("UserPromptSubmit", []))
+    stop_command = f"/usr/bin/env python3 {shlex.quote(str(stop_script_path))}"
     stop_groups.append(
         {
             "hooks": [
                 {
                     "type": "command",
-                    "command": command,
+                    "command": stop_command,
                     "async": False,
                     "timeout": 3700,
                     "statusMessage": HOOK_STATUS,
@@ -124,7 +132,22 @@ def install_hook(codex_home: Path, script_path: Path) -> Path | None:
             ]
         }
     )
+    user_prompt_command = f"/usr/bin/env python3 {shlex.quote(str(user_prompt_script_path))}"
+    user_prompt_groups.append(
+        {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": user_prompt_command,
+                    "async": False,
+                    "timeout": 10,
+                    "statusMessage": USER_PROMPT_HOOK_STATUS,
+                }
+            ]
+        }
+    )
     hooks["Stop"] = stop_groups
+    hooks["UserPromptSubmit"] = user_prompt_groups
     config.setdefault("description", "Codex lifecycle hooks")
     write_json_atomic(hooks_path, config)
     return backup
@@ -137,13 +160,16 @@ def preflight_hook_config(codex_home: Path) -> None:
     if hooks is not None and not isinstance(hooks, dict):
         raise SystemExit(f"{hooks_path}: 'hooks' must be a JSON object")
     if isinstance(hooks, dict):
-        stop_groups = hooks.get("Stop")
-        if stop_groups is not None and not isinstance(stop_groups, list):
-            raise SystemExit(f"{hooks_path}: 'hooks.Stop' must be a JSON array")
+        for event_name in ("Stop", "UserPromptSubmit"):
+            event_groups = hooks.get(event_name)
+            if event_groups is not None and not isinstance(event_groups, list):
+                raise SystemExit(f"{hooks_path}: 'hooks.{event_name}' must be a JSON array")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Install the defer-and-resume Codex Skill and Stop Hook")
+    parser = argparse.ArgumentParser(
+        description="Install the defer-and-resume Codex Skill and lifecycle Hooks"
+    )
     parser.add_argument("--codex-home", type=Path, default=default_codex_home())
     return parser.parse_args()
 
@@ -162,10 +188,15 @@ def main() -> int:
     destination = codex_home / "skills" / SKILL_NAME
     backup_root = codex_home / "backups" / SKILL_NAME
     skill_backup = install_skill(source_skill, destination, backup_root)
-    hook_backup = install_hook(codex_home, destination / "scripts" / "stop_hook.py")
+    scripts = destination / "scripts"
+    hook_backup = install_hook(
+        codex_home,
+        scripts / "stop_hook.py",
+        scripts / "user_prompt_hook.py",
+    )
 
     print(f"Installed Skill: {destination}")
-    print(f"Configured Stop Hook: {codex_home / 'hooks.json'}")
+    print(f"Configured Stop and UserPromptSubmit Hooks: {codex_home / 'hooks.json'}")
     if skill_backup:
         print(f"Previous Skill backup: {skill_backup}")
     if hook_backup:

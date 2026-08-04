@@ -13,6 +13,7 @@ from typing import Any
 
 SKILL_NAME = "defer-and-resume"
 HOOK_STATUS = "Waiting for deferred work with one-shot cache keepalive"
+USER_PROMPT_HOOK_STATUS = "Disarming deferred waits on user input"
 
 
 def timestamp() -> str:
@@ -48,8 +49,10 @@ def is_defer_hook(hook: Any) -> bool:
     return hook.get("statusMessage") in {
         HOOK_STATUS,
         "Waiting for deferred work with periodic cache keepalive",
+        USER_PROMPT_HOOK_STATUS,
     } or (
-        "defer-and-resume" in command and command.endswith("stop_hook.py")
+        "defer-and-resume" in command
+        and command.endswith(("stop_hook.py", "user_prompt_hook.py"))
     )
 
 
@@ -61,33 +64,36 @@ def remove_hook(codex_home: Path) -> Path | None:
     hooks = config.get("hooks")
     if not isinstance(hooks, dict):
         return None
-    stop_groups = hooks.get("Stop")
-    if not isinstance(stop_groups, list):
-        return None
-
     changed = False
-    retained_groups: list[Any] = []
-    for group in stop_groups:
-        if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
-            retained_groups.append(group)
+    retained_by_event: dict[str, list[Any]] = {}
+    for event_name in ("Stop", "UserPromptSubmit"):
+        event_groups = hooks.get(event_name)
+        if not isinstance(event_groups, list):
             continue
-        remaining = [hook for hook in group["hooks"] if not is_defer_hook(hook)]
-        if len(remaining) != len(group["hooks"]):
-            changed = True
-        if remaining:
-            updated = dict(group)
-            updated["hooks"] = remaining
-            retained_groups.append(updated)
+        retained_groups: list[Any] = []
+        for group in event_groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                retained_groups.append(group)
+                continue
+            remaining = [hook for hook in group["hooks"] if not is_defer_hook(hook)]
+            if len(remaining) != len(group["hooks"]):
+                changed = True
+            if remaining:
+                updated = dict(group)
+                updated["hooks"] = remaining
+                retained_groups.append(updated)
+        retained_by_event[event_name] = retained_groups
     if not changed:
         return None
 
     backup = hooks_path.with_name(f"hooks.json.backup-{timestamp()}-{uuid.uuid4().hex[:8]}")
     shutil.copy2(hooks_path, backup)
     os.chmod(backup, 0o600)
-    if retained_groups:
-        hooks["Stop"] = retained_groups
-    else:
-        hooks.pop("Stop", None)
+    for event_name, retained_groups in retained_by_event.items():
+        if retained_groups:
+            hooks[event_name] = retained_groups
+        else:
+            hooks.pop(event_name, None)
     write_json_atomic(hooks_path, config)
     return backup
 
@@ -103,7 +109,9 @@ def incomplete_tasks(runtime_root: Path) -> list[Path]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Uninstall the defer-and-resume Codex Skill and Stop Hook")
+    parser = argparse.ArgumentParser(
+        description="Uninstall the defer-and-resume Codex Skill and lifecycle Hooks"
+    )
     parser.add_argument("--codex-home", type=Path, default=default_codex_home())
     parser.add_argument("--purge-runtime", action="store_true")
     parser.add_argument("--force", action="store_true", help="Abandon incomplete deferred tasks")
@@ -136,9 +144,9 @@ def main() -> int:
     elif runtime_root.exists():
         print(f"Retained runtime state: {runtime_root}")
     if hook_backup:
-        print(f"Removed Stop Hook; previous config backup: {hook_backup}")
+        print(f"Removed defer-and-resume lifecycle Hooks; previous config backup: {hook_backup}")
     else:
-        print("No defer-and-resume Stop Hook was present.")
+        print("No defer-and-resume hooks were present.")
     return 0
 
 
