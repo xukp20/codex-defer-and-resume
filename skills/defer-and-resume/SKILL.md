@@ -43,13 +43,19 @@ For a completion prompt:
    python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" inspect --task-dir <path>
    ```
 
-2. Record required evidence, then acknowledge the wake so it is not retried:
+2. Record the required evidence and continue the original task. The Hook has
+   already disarmed this one-shot registration, so no acknowledgement is
+   needed to prevent another wake.
+
+   `ack` remains available when an external audit needs an explicit evidence
+   marker, but it is optional:
 
    ```bash
    python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" ack --task-dir <path>
    ```
 
-3. Continue the original task. The completion wake is one-shot, so an unacknowledged result is not repeatedly injected. Remove consumed state when it is no longer needed:
+3. Remove consumed state when it is no longer needed. Completed tasks can be
+   cleaned directly, with or without `ack`:
 
    ```bash
    python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" clean --task-dir <path>
@@ -73,7 +79,7 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" a
 # Disarm waiting without cancelling the worker
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" disarm --task-dir <path>
 
-# Remove acknowledged state older than seven days
+# Remove completed state older than seven days
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" gc
 ```
 
@@ -87,7 +93,7 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" g
 - A user interruption disarms the wait registration but does not cancel the worker. Run `arm` to wait again or `cancel` to stop it.
 - Override the keepalive interval with `CODEX_DEFER_KEEPALIVE_SECONDS` only when provider evidence justifies it. Leave a safety margin below the measured cache horizon.
 - A missing worker produces exit code `125`, a command timeout `124`, and cancellation `130`.
-- Do not force-clean unacknowledged state unless recovery is intentionally abandoned.
+- Do not force-clean incomplete state unless recovery is intentionally abandoned.
 
 ## Bundled scripts
 

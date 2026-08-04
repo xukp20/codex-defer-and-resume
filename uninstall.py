@@ -92,13 +92,13 @@ def remove_hook(codex_home: Path) -> Path | None:
     return backup
 
 
-def unacknowledged_tasks(runtime_root: Path) -> list[Path]:
+def incomplete_tasks(runtime_root: Path) -> list[Path]:
     if not runtime_root.is_dir():
         return []
     return [
         metadata.parent
         for metadata in runtime_root.glob("*/*/metadata.json")
-        if not (metadata.parent / "ack.json").exists()
+        if not (metadata.parent / "result.json").exists()
     ]
 
 
@@ -106,7 +106,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Uninstall the defer-and-resume Codex Skill and Stop Hook")
     parser.add_argument("--codex-home", type=Path, default=default_codex_home())
     parser.add_argument("--purge-runtime", action="store_true")
-    parser.add_argument("--force", action="store_true", help="Abandon unacknowledged deferred tasks")
+    parser.add_argument("--force", action="store_true", help="Abandon incomplete deferred tasks")
     return parser.parse_args()
 
 
@@ -114,12 +114,12 @@ def main() -> int:
     args = parse_args()
     codex_home = args.codex_home.expanduser().resolve()
     runtime_root = codex_home / "runtime" / SKILL_NAME
-    active = unacknowledged_tasks(runtime_root)
+    active = incomplete_tasks(runtime_root)
     if active and not args.force:
         names = "\n".join(f"- {path}" for path in active)
         raise SystemExit(
-            "Refusing to uninstall while deferred tasks are unacknowledged. "
-            "Acknowledge/clean them first or rerun with --force:\n" + names
+            "Refusing to uninstall while deferred tasks are incomplete. "
+            "Wait for or cancel them first, or rerun with --force:\n" + names
         )
 
     hook_backup = remove_hook(codex_home)

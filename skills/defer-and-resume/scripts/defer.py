@@ -356,12 +356,16 @@ def arm(args: argparse.Namespace) -> int:
     task_dir = validate_task_dir(args.task_dir)
     if (task_dir / "ack.json").exists():
         raise SystemExit("cannot arm an acknowledged task; clean it first")
+    # A deliberate re-arm starts a new one-shot registration. The previous
+    # wake marker belongs to the old registration and must not be reused.
+    (task_dir / "wake.json").unlink(missing_ok=True)
     update_wait_state(
         task_dir,
         WAIT_ARMED,
         armed_at=now_iso(),
         disarmed_at=None,
         disarm_reason=None,
+        wake_emitted_at=None,
         wake_delivered_at=None,
         completion_exit_code=None,
     )
@@ -421,8 +425,8 @@ def cancel(args: argparse.Namespace) -> int:
 
 def clean(args: argparse.Namespace) -> int:
     task_dir = validate_task_dir(args.task_dir)
-    if not args.force and not (task_dir / "ack.json").exists():
-        raise SystemExit("refusing to clean an unacknowledged task; run ack first or use --force")
+    if not args.force and not (task_dir / "result.json").exists():
+        raise SystemExit("refusing to clean an incomplete task; wait for completion or use --force")
     shutil.rmtree(task_dir)
     return 0
 
@@ -434,13 +438,32 @@ def gc(args: argparse.Namespace) -> int:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=args.older_than_hours)
     removed: list[str] = []
     if root.is_dir():
-        for ack_path in root.glob("*/*/ack.json"):
-            task_dir = ack_path.parent
+        for metadata_path in root.glob("*/*/metadata.json"):
+            task_dir = metadata_path.parent
+            result_path = task_dir / "result.json"
+            if not result_path.is_file():
+                # Never collect a registration whose worker has not produced
+                # a terminal result, even when an old wait file is present.
+                continue
+            worker_path = task_dir / "worker.json"
+            if worker_path.is_file():
+                try:
+                    if process_alive(int(read_json(worker_path).get("pid", 0))):
+                        continue
+                except (TypeError, ValueError, OSError, json.JSONDecodeError):
+                    continue
             try:
-                acked_at = parse_iso(str(read_json(ack_path)["acknowledged_at"]))
+                ack_path = task_dir / "ack.json"
+                if ack_path.is_file():
+                    timestamp = read_json(ack_path).get("acknowledged_at")
+                else:
+                    timestamp = read_json(result_path).get("completed_at")
+                if not isinstance(timestamp, str):
+                    timestamp = read_json(metadata_path).get("registered_at")
+                completed_at = parse_iso(str(timestamp))
             except Exception:
                 continue
-            if acked_at <= cutoff:
+            if completed_at <= cutoff:
                 shutil.rmtree(task_dir)
                 removed.append(str(task_dir))
         for thread_dir in root.iterdir():

@@ -125,7 +125,10 @@ The install operation is idempotent and does not add duplicate Hook entries.
 python3 uninstall.py
 ```
 
-Uninstall refuses to proceed while unacknowledged deferred tasks exist. Use `--force` only when intentionally abandoning them. Runtime evidence is retained unless `--purge-runtime` is specified.
+Uninstall refuses to proceed while incomplete deferred tasks exist. Completed
+tasks do not need an acknowledgement before uninstall. Use `--force` only when
+intentionally abandoning incomplete work. Runtime evidence is retained unless
+`--purge-runtime` is specified.
 
 ## Security
 
@@ -134,7 +137,9 @@ Uninstall refuses to proceed while unacknowledged deferred tasks exist. Use `--f
 - Command arguments may still be visible to the operating system while the command runs; do not place secrets in them.
 - Runtime directories are owner-only (`0700`), and state/log files are owner-only (`0600`).
 - The Hook injects bounded completion metadata; complete output remains on disk.
-- Completion wakes are delivered once per registration. `ack` records that the agent consumed the evidence; it no longer controls wake retries.
+- Completion wakes are emitted once per registration and immediately disarm
+  the wait. `ack` is an optional evidence marker; it does not control wake
+  retries or whether a completed task can be cleaned.
 - Exit code `124` means timeout, `125` means the worker disappeared, and `130` means cancellation.
 
 ## Development

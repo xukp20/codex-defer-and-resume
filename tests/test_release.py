@@ -112,7 +112,7 @@ class InstallerTests(unittest.TestCase):
             ]
             self.assertEqual([hook.get("statusMessage") for hook in remaining], ["unrelated"])
 
-    def test_uninstall_refuses_unacknowledged_runtime(self) -> None:
+    def test_uninstall_refuses_incomplete_runtime_but_accepts_completed_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             codex_home = Path(temporary) / "codex"
             run(sys.executable, str(INSTALLER), "--codex-home", str(codex_home))
@@ -131,6 +131,11 @@ class InstallerTests(unittest.TestCase):
             self.assertIn("Refusing to uninstall", refused.stderr)
             self.assertTrue((codex_home / "skills" / "defer-and-resume").exists())
 
+            (task / "result.json").write_text('{"exit_code": 0}', encoding="utf-8")
+            run(sys.executable, str(UNINSTALLER), "--codex-home", str(codex_home))
+            self.assertFalse((codex_home / "skills" / "defer-and-resume").exists())
+
+            run(sys.executable, str(INSTALLER), "--codex-home", str(codex_home))
             run(
                 sys.executable,
                 str(UNINSTALLER),
@@ -210,7 +215,8 @@ class DeferredRuntimeTests(unittest.TestCase):
         self.assertEqual(completion["decision"], "block")
         result = json.loads((task_dir / "result.json").read_text(encoding="utf-8"))
         self.assertEqual(result["exit_code"], 0)
-        self.acknowledge_and_clean(task_dir)
+        run(sys.executable, str(self.defer), "clean", "--task-dir", str(task_dir), env=self.environment)
+        self.assertFalse(task_dir.exists())
 
     def test_completion_wake_is_one_shot(self) -> None:
         task_dir = self.start_task("0.01")
@@ -218,14 +224,51 @@ class DeferredRuntimeTests(unittest.TestCase):
         self.assertIn("Deferred work has completed", str(first["reason"]))
         first_wake = json.loads((task_dir / "wake.json").read_text(encoding="utf-8"))
         self.assertEqual(first_wake["attempt"], 1)
+        self.assertTrue(first_wake["emitted"])
+        self.assertNotIn("ack", str(first["reason"]).lower())
+        wait = json.loads((task_dir / "wait.json").read_text(encoding="utf-8"))
+        self.assertEqual(wait["state"], "disarmed")
 
         second = self.hook_call(continuing=True)
         self.assertEqual(second, {"continue": True})
         second_wake = json.loads((task_dir / "wake.json").read_text(encoding="utf-8"))
         self.assertEqual(second_wake["attempt"], 1)
+        run(sys.executable, str(self.defer), "clean", "--task-dir", str(task_dir), env=self.environment)
+        self.assertFalse(task_dir.exists())
+
+    def test_rearm_starts_a_new_completion_registration(self) -> None:
+        task_dir = self.start_task("0.01")
+        self.assertIn("Deferred work has completed", str(self.hook_call()["reason"]))
+        self.assertTrue((task_dir / "wake.json").exists())
+
+        run(sys.executable, str(self.defer), "arm", "--task-dir", str(task_dir), env=self.environment)
+        self.assertFalse((task_dir / "wake.json").exists())
+        self.assertIn("Deferred work has completed", str(self.hook_call()["reason"]))
         wait = json.loads((task_dir / "wait.json").read_text(encoding="utf-8"))
         self.assertEqual(wait["state"], "disarmed")
-        self.acknowledge_and_clean(task_dir)
+        run(sys.executable, str(self.defer), "clean", "--task-dir", str(task_dir), env=self.environment)
+
+    def test_gc_collects_completed_state_without_ack(self) -> None:
+        task_dir = self.codex_home / "runtime" / "defer-and-resume" / "test-thread" / "gc-task"
+        task_dir.mkdir(parents=True)
+        (task_dir / "metadata.json").write_text(
+            json.dumps({"registered_at": "2000-01-01T00:00:00+00:00"}),
+            encoding="utf-8",
+        )
+        (task_dir / "result.json").write_text(
+            json.dumps({"completed_at": "2000-01-01T00:00:01+00:00", "exit_code": 0}),
+            encoding="utf-8",
+        )
+
+        run(
+            sys.executable,
+            str(self.defer),
+            "gc",
+            "--older-than-hours",
+            "0",
+            env=self.environment,
+        )
+        self.assertFalse(task_dir.exists())
 
     def test_timeout_exit_code(self) -> None:
         task_dir = self.start_task("0.3", timeout="0.05")

@@ -237,21 +237,24 @@ def emit_completion(tasks: list[Path]) -> None:
         metadata = read_json(task / "metadata.json")
         result = read_json(task / "result.json")
         wake_path = task / "wake.json"
+        emitted_at = now_iso()
         if not wake_path.exists():
             write_json_atomic(
                 wake_path,
                 {
-                    "emitted_at": now_iso(),
-                    "delivered": True,
+                    "emitted_at": emitted_at,
+                    "emitted": True,
                     "attempt": 1,
                     "exit_code": result.get("exit_code"),
                 },
             )
         update_wait(
             task,
-            WAIT_COMPLETION_PENDING,
-            wake_delivered_at=now_iso(),
+            WAIT_DISARMED,
+            wake_emitted_at=emitted_at,
             completion_exit_code=result.get("exit_code"),
+            disarmed_at=emitted_at,
+            disarm_reason="completion wake emitted",
         )
         summaries.append(
             f"{metadata.get('name', task.name)} completed with exit code {result.get('exit_code')}; "
@@ -261,8 +264,8 @@ def emit_completion(tasks: list[Path]) -> None:
         {
             "decision": "block",
             "reason": "Deferred work has completed. Read result.json and only the necessary portion of "
-            "output.log, then run defer.py ack. This wake is one-shot; ack records evidence and clean "
-            "removes state.\n" + "\n".join(summaries),
+            "output.log, then continue the original task. The completion wake is already disarmed; "
+            "cleanup is optional.\n" + "\n".join(summaries),
         }
     )
 
