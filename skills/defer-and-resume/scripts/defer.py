@@ -19,6 +19,14 @@ RESULT_STALE_WORKER = 125
 RESULT_TIMEOUT = 124
 RESULT_CANCELLED = 130
 
+WAIT_ARMED = "armed"
+WAIT_WAITING = "waiting"
+WAIT_KEEPALIVE_PENDING = "keepalive_pending"
+WAIT_COMPLETION_PENDING = "completion_pending"
+WAIT_DISARMED = "disarmed"
+WAIT_EXPIRED = "expired"
+WAIT_CANCELLED = "cancelled"
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -98,6 +106,38 @@ def write_result_if_absent(task_dir: Path, value: dict[str, Any]) -> bool:
         return False
     write_json_atomic(result_path, value)
     return True
+
+
+def wait_path(task_dir: Path) -> Path:
+    return task_dir / "wait.json"
+
+
+def read_wait_state(task_dir: Path) -> dict[str, Any]:
+    path = wait_path(task_dir)
+    if path.exists():
+        value = read_json(path)
+        if not isinstance(value.get("state"), str):
+            raise ValueError(f"{path} must contain a string state")
+        return value
+    metadata = read_json(task_dir / "metadata.json")
+    value = {
+        "version": 1,
+        "state": WAIT_ARMED,
+        "armed_at": metadata.get("registered_at", now_iso()),
+        "updated_at": now_iso(),
+    }
+    write_json_atomic(path, value)
+    return value
+
+
+def update_wait_state(task_dir: Path, state: str, **fields: Any) -> dict[str, Any]:
+    value = read_wait_state(task_dir)
+    value.update(fields)
+    value["version"] = 1
+    value["state"] = state
+    value["updated_at"] = now_iso()
+    write_json_atomic(wait_path(task_dir), value)
+    return value
 
 
 def stale_worker_result(task_dir: Path) -> dict[str, Any] | None:
@@ -213,6 +253,7 @@ def start(args: argparse.Namespace) -> int:
             "registered_at": now_iso(),
         },
     )
+    update_wait_state(task_dir, WAIT_ARMED, armed_at=now_iso())
     create_log(task_dir / "output.log")
 
     child = subprocess.Popen(
@@ -235,6 +276,7 @@ def start(args: argparse.Namespace) -> int:
 
 def task_status(task_dir: Path) -> dict[str, Any]:
     metadata = read_json(task_dir / "metadata.json")
+    wait = read_wait_state(task_dir)
     result = stale_worker_result(task_dir)
     worker_info = read_json(task_dir / "worker.json") if (task_dir / "worker.json").exists() else {}
     if (task_dir / "ack.json").exists():
@@ -253,6 +295,7 @@ def task_status(task_dir: Path) -> dict[str, Any]:
         "state": state,
         "registered_at": metadata.get("registered_at"),
         "worker_pid": worker_info.get("pid"),
+        "wait_state": wait.get("state"),
     }
     if result:
         value.update(
@@ -270,7 +313,7 @@ def task_status(task_dir: Path) -> dict[str, Any]:
 def inspect(args: argparse.Namespace) -> int:
     task_dir = validate_task_dir(args.task_dir)
     value: dict[str, Any] = {"task_dir": str(task_dir), "status": task_status(task_dir)}
-    for name in ("metadata.json", "worker.json", "result.json", "wake.json", "ack.json"):
+    for name in ("metadata.json", "worker.json", "wait.json", "result.json", "wake.json", "ack.json"):
         path = task_dir / name
         if path.exists():
             value[name.removesuffix(".json")] = read_json(path)
@@ -309,11 +352,36 @@ def acknowledge(args: argparse.Namespace) -> int:
     return 0
 
 
+def arm(args: argparse.Namespace) -> int:
+    task_dir = validate_task_dir(args.task_dir)
+    if (task_dir / "ack.json").exists():
+        raise SystemExit("cannot arm an acknowledged task; clean it first")
+    update_wait_state(
+        task_dir,
+        WAIT_ARMED,
+        armed_at=now_iso(),
+        disarmed_at=None,
+        disarm_reason=None,
+        wake_delivered_at=None,
+        completion_exit_code=None,
+    )
+    print(json.dumps(task_status(task_dir), ensure_ascii=False))
+    return 0
+
+
+def disarm(args: argparse.Namespace) -> int:
+    task_dir = validate_task_dir(args.task_dir)
+    update_wait_state(task_dir, WAIT_DISARMED, disarmed_at=now_iso(), disarm_reason="disarmed by agent")
+    print(json.dumps(task_status(task_dir), ensure_ascii=False))
+    return 0
+
+
 def cancel(args: argparse.Namespace) -> int:
     if args.grace_seconds < 0:
         raise SystemExit("--grace-seconds cannot be negative")
     task_dir = validate_task_dir(args.task_dir)
     if (task_dir / "result.json").exists():
+        update_wait_state(task_dir, WAIT_CANCELLED, cancelled_at=now_iso(), cancel_reason="cancelled by agent")
         print(json.dumps(task_status(task_dir), ensure_ascii=False))
         return 0
     metadata = read_json(task_dir / "metadata.json")
@@ -346,6 +414,7 @@ def cancel(args: argparse.Namespace) -> int:
             "log_path": str(task_dir / "output.log"),
         },
     )
+    update_wait_state(task_dir, WAIT_CANCELLED, cancelled_at=now_iso(), cancel_reason="cancelled by agent")
     print(json.dumps(task_status(task_dir), ensure_ascii=False))
     return 0
 
@@ -406,6 +475,12 @@ def parse_args() -> argparse.Namespace:
     ack_parser = subparsers.add_parser("ack")
     ack_parser.add_argument("--task-dir", required=True)
 
+    arm_parser = subparsers.add_parser("arm")
+    arm_parser.add_argument("--task-dir", required=True)
+
+    disarm_parser = subparsers.add_parser("disarm")
+    disarm_parser.add_argument("--task-dir", required=True)
+
     cancel_parser = subparsers.add_parser("cancel")
     cancel_parser.add_argument("--task-dir", required=True)
     cancel_parser.add_argument("--grace-seconds", type=float, default=1.0)
@@ -433,6 +508,10 @@ def main() -> int:
         return list_tasks(args)
     if args.action == "ack":
         return acknowledge(args)
+    if args.action == "arm":
+        return arm(args)
+    if args.action == "disarm":
+        return disarm(args)
     if args.action == "cancel":
         return cancel(args)
     if args.action == "clean":

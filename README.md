@@ -23,7 +23,7 @@ the command writes result.json
 the Hook resumes the same Codex task
 ```
 
-While a command is still running, the Hook performs a short cache-keepalive wake every 25 minutes by default. The agent immediately ends that turn and re-enters local waiting. This is intended to stay below an empirically observed cache horizon; it is not an OpenAI guarantee.
+While a command is still running, the Hook performs a short cache-keepalive wake every 25 minutes by default. The agent immediately ends that turn and the same registration automatically re-enters local waiting on the continuation turn; no second `start` call is needed. Completion is a one-shot wake. If a user interrupts the waiting turn, the registration is disarmed and is not silently resumed on the next user turn. The interval is a provider-specific heuristic, not an OpenAI guarantee.
 
 ## Requirements
 
@@ -85,6 +85,12 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" i
 
 # Cancel a running command and its process group
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" cancel --task-dir <path>
+
+# Re-arm an existing worker after a disabled keepalive window expired
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" arm --task-dir <path>
+
+# Stop waiting without cancelling the worker
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" disarm --task-dir <path>
 ```
 
 ## Configuration
@@ -95,11 +101,14 @@ Environment variables are read by the runner or Stop Hook:
 |---|---:|---|
 | `CODEX_HOME` | `~/.codex` | Codex configuration and runtime root |
 | `CODEX_DEFER_RUNTIME` | `$CODEX_HOME/runtime/defer-and-resume` | Override task-state storage |
+| `CODEX_DEFER_KEEPALIVE_ENABLED` | `true` | Emit continuation turns while work is still running; set to `false` to wait once and disarm when the local Hook window expires |
 | `CODEX_DEFER_KEEPALIVE_SECONDS` | `1500` | Maximum local wait before a cache-keepalive wake |
 | `CODEX_DEFER_POLL_SECONDS` | `0.5` | Local filesystem polling interval |
-| `CODEX_DEFER_WAKE_RETRY_SECONDS` | `60` | Retry delay for an unacknowledged completion wake |
+| `CODEX_DEFER_HOOK_MAX_WAIT` | `CODEX_DEFER_KEEPALIVE_SECONDS` | Backward-compatible alias for the local Hook wait window |
 
 Keep the cache-keepalive interval below the cache horizon measured for your provider. Lower values cause more model calls; higher values increase the risk of a cold prompt.
+
+The Hook uses the `stop_hook_active` field supplied by Codex to distinguish an automatic continuation from a new user turn. A normal continuation keeps the registration armed; a manually interrupted turn disarms it. There is no retry loop for a delivered completion wake.
 
 ## Update
 
@@ -125,6 +134,7 @@ Uninstall refuses to proceed while unacknowledged deferred tasks exist. Use `--f
 - Command arguments may still be visible to the operating system while the command runs; do not place secrets in them.
 - Runtime directories are owner-only (`0700`), and state/log files are owner-only (`0600`).
 - The Hook injects bounded completion metadata; complete output remains on disk.
+- Completion wakes are delivered once per registration. `ack` records that the agent consumed the evidence; it no longer controls wake retries.
 - Exit code `124` means timeout, `125` means the worker disappeared, and `130` means cancellation.
 
 ## Development

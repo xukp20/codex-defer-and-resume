@@ -14,7 +14,7 @@ from typing import Any
 
 
 SKILL_NAME = "defer-and-resume"
-HOOK_STATUS = "Waiting for deferred work with periodic cache keepalive"
+HOOK_STATUS = "Waiting for deferred work with one-shot cache keepalive"
 
 
 def timestamp() -> str:
@@ -48,7 +48,10 @@ def is_defer_hook(hook: Any) -> bool:
     if not isinstance(hook, dict):
         return False
     command = str(hook.get("command", ""))
-    return hook.get("statusMessage") == HOOK_STATUS or (
+    return hook.get("statusMessage") in {
+        HOOK_STATUS,
+        "Waiting for deferred work with periodic cache keepalive",
+    } or (
         "defer-and-resume" in command and command.endswith("stop_hook.py")
     )
 

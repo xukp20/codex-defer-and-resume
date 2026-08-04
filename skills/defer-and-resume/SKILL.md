@@ -11,7 +11,7 @@ Use the bundled runner as a service-independent completion primitive. Decide whi
 
 - Run ordinary foreground commands expected to finish within about ten minutes.
 - Use same-task deferral for longer or unpredictable work when retaining the current task is valuable.
-- Treat the configured cache-keepalive interval as a heuristic, not a provider guarantee. The default Hook interval is 25 minutes.
+- Treat the configured cache-keepalive interval as a heuristic, not a provider guarantee. The default Hook interval is 25 minutes and keepalive is enabled by default.
 - Before a wait likely to outlive prompt caching, write a concise checkpoint containing the objective, workspace, branch or commit, background task directory, completed work, and next actions.
 - If the current Codex surface exposes a safe explicit compaction action, compact before a long wait and verify that context usage fell. Do not start a competing app-server or mutate an active task through an unowned connection.
 
@@ -33,7 +33,7 @@ Then finish the current turn. Do not poll with model tool calls. Keep Codex Desk
 
 ## Handle Hook prompts
 
-For a `Cache keepalive wake` prompt, do not inspect, poll, or call tools. Immediately finish the turn with the shortest useful response so the Stop Hook continues local waiting.
+For a `Cache keepalive wake` prompt, do not inspect, poll, or call tools. Immediately finish the turn with the shortest useful response. The same registration remains armed and the Stop Hook automatically re-enters local waiting on the continuation turn; do not call `start` again.
 
 For a completion prompt:
 
@@ -49,7 +49,7 @@ For a completion prompt:
    python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" ack --task-dir <path>
    ```
 
-3. Continue the original task. Remove consumed state when it is no longer needed:
+3. Continue the original task. The completion wake is one-shot, so an unacknowledged result is not repeatedly injected. Remove consumed state when it is no longer needed:
 
    ```bash
    python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" clean --task-dir <path>
@@ -67,6 +67,12 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" s
 # Stop a running command and its process group
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" cancel --task-dir <path>
 
+# Re-arm a worker after an expired or interrupted wait
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" arm --task-dir <path>
+
+# Disarm waiting without cancelling the worker
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" disarm --task-dir <path>
+
 # Remove acknowledged state older than seven days
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" gc
 ```
@@ -77,6 +83,8 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" g
 - Never defer commands requiring interactive input, approval, passwords, or a TTY.
 - Do not place secrets in command arguments. Persistent metadata omits full arguments, but the operating system may expose them while the command runs.
 - Treat process exit as command completion, not proof that the wider workflow succeeded.
+- The runner accepts an argv array and executes it directly; it is not Bash-only. Use an explicit `bash -lc '...'` argv when shell syntax is genuinely required.
+- A user interruption disarms the wait registration but does not cancel the worker. Run `arm` to wait again or `cancel` to stop it.
 - Override the keepalive interval with `CODEX_DEFER_KEEPALIVE_SECONDS` only when provider evidence justifies it. Leave a safety margin below the measured cache horizon.
 - A missing worker produces exit code `125`, a command timeout `124`, and cancellation `130`.
 - Do not force-clean unacknowledged state unless recovery is intentionally abandoned.
@@ -84,4 +92,4 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" g
 ## Bundled scripts
 
 - `scripts/defer.py`: start, inspect, list, status, cancel, acknowledge, clean, and garbage-collect generic tasks.
-- `scripts/stop_hook.py`: wait for current-task registrations, issue periodic cache keepalives, detect stale workers, and retry unacknowledged completion wakes.
+- `scripts/stop_hook.py`: wait for current-task registrations, issue periodic cache keepalives, detect stale workers, and deliver one-shot completion wakes.

@@ -181,12 +181,12 @@ class DeferredRuntimeTests(unittest.TestCase):
         )
         return Path(json.loads(started.stdout)["task_dir"])
 
-    def hook_call(self) -> dict[str, object]:
+    def hook_call(self, *, continuing: bool = False) -> dict[str, object]:
         completed = run(
             sys.executable,
             str(self.hook),
             env=self.environment,
-            input_text="{}",
+            input_text=json.dumps({"stop_hook_active": continuing}),
         )
         return json.loads(completed.stdout)
 
@@ -202,7 +202,7 @@ class DeferredRuntimeTests(unittest.TestCase):
 
         completion: dict[str, object] | None = None
         for _ in range(5):
-            response = self.hook_call()
+            response = self.hook_call(continuing=True)
             if "Deferred work has completed" in str(response.get("reason")):
                 completion = response
                 break
@@ -212,17 +212,19 @@ class DeferredRuntimeTests(unittest.TestCase):
         self.assertEqual(result["exit_code"], 0)
         self.acknowledge_and_clean(task_dir)
 
-    def test_unacknowledged_completion_is_retried(self) -> None:
+    def test_completion_wake_is_one_shot(self) -> None:
         task_dir = self.start_task("0.01")
         first = self.hook_call()
         self.assertIn("Deferred work has completed", str(first["reason"]))
         first_wake = json.loads((task_dir / "wake.json").read_text(encoding="utf-8"))
         self.assertEqual(first_wake["attempt"], 1)
 
-        second = self.hook_call()
-        self.assertIn("Deferred work has completed", str(second["reason"]))
+        second = self.hook_call(continuing=True)
+        self.assertEqual(second, {"continue": True})
         second_wake = json.loads((task_dir / "wake.json").read_text(encoding="utf-8"))
-        self.assertEqual(second_wake["attempt"], 2)
+        self.assertEqual(second_wake["attempt"], 1)
+        wait = json.loads((task_dir / "wait.json").read_text(encoding="utf-8"))
+        self.assertEqual(wait["state"], "disarmed")
         self.acknowledge_and_clean(task_dir)
 
     def test_timeout_exit_code(self) -> None:
@@ -231,6 +233,32 @@ class DeferredRuntimeTests(unittest.TestCase):
         self.assertIn("exit code 124", str(completion["reason"]))
         result = json.loads((task_dir / "result.json").read_text(encoding="utf-8"))
         self.assertTrue(result["timed_out"])
+        self.acknowledge_and_clean(task_dir)
+
+    def test_interrupted_wait_is_disarmed_without_cancelling_worker(self) -> None:
+        task_dir = self.start_task("0.5")
+        heartbeat = self.hook_call()
+        self.assertEqual(heartbeat["decision"], "block")
+        interrupted = self.hook_call()
+        self.assertEqual(interrupted, {"continue": True})
+        wait = json.loads((task_dir / "wait.json").read_text(encoding="utf-8"))
+        self.assertEqual(wait["state"], "disarmed")
+        run(sys.executable, str(self.defer), "cancel", "--task-dir", str(task_dir), env=self.environment)
+        self.acknowledge_and_clean(task_dir)
+
+    def test_keepalive_can_be_disabled_and_rearmed(self) -> None:
+        self.environment["CODEX_DEFER_KEEPALIVE_ENABLED"] = "false"
+        task_dir = self.start_task("0.4")
+        expired = self.hook_call()
+        self.assertEqual(expired["continue"], True)
+        self.assertIn("wait window expired", str(expired["systemMessage"]))
+        wait = json.loads((task_dir / "wait.json").read_text(encoding="utf-8"))
+        self.assertEqual(wait["state"], "expired")
+
+        self.environment["CODEX_DEFER_KEEPALIVE_SECONDS"] = "0.5"
+        run(sys.executable, str(self.defer), "arm", "--task-dir", str(task_dir), env=self.environment)
+        completion = self.hook_call()
+        self.assertIn("Deferred work has completed", str(completion["reason"]))
         self.acknowledge_and_clean(task_dir)
 
 
