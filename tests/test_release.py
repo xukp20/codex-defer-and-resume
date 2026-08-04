@@ -323,6 +323,27 @@ class DeferredRuntimeTests(unittest.TestCase):
         )
         self.assertFalse(task_dir.exists())
 
+    def test_ack_runs_default_gc_and_keeps_current_task(self) -> None:
+        old_task = self.codex_home / "runtime" / "defer-and-resume" / "old-thread" / "gc-task"
+        old_task.mkdir(parents=True)
+        (old_task / "metadata.json").write_text(
+            json.dumps({"registered_at": "2000-01-01T00:00:00+00:00"}),
+            encoding="utf-8",
+        )
+        (old_task / "result.json").write_text(
+            json.dumps({"completed_at": "2000-01-01T00:00:01+00:00", "exit_code": 0}),
+            encoding="utf-8",
+        )
+
+        current_task = self.start_task("0.01")
+        self.assertIn("Deferred work has completed", str(self.hook_call()["reason"]))
+        run(sys.executable, str(self.defer), "ack", "--task-dir", str(current_task), env=self.environment)
+
+        self.assertFalse(old_task.exists())
+        self.assertTrue(current_task.exists())
+        self.assertTrue((current_task / "ack.json").exists())
+        run(sys.executable, str(self.defer), "clean", "--task-dir", str(current_task), env=self.environment)
+
     def test_timeout_exit_code(self) -> None:
         task_dir = self.start_task("0.3", timeout="0.05")
         completion = self.hook_call()

@@ -18,6 +18,7 @@ from typing import Any
 RESULT_STALE_WORKER = 125
 RESULT_TIMEOUT = 124
 RESULT_CANCELLED = 130
+DEFAULT_GC_OLDER_THAN_HOURS = 168.0
 
 WAIT_ARMED = "armed"
 WAIT_WAITING = "waiting"
@@ -348,6 +349,15 @@ def acknowledge(args: argparse.Namespace) -> int:
     if not (task_dir / "result.json").exists():
         raise SystemExit("cannot acknowledge an incomplete task")
     write_json_atomic(task_dir / "ack.json", {"acknowledged_at": now_iso()})
+    # Keep acknowledgement backwards-compatible while opportunistically
+    # collecting completed state that has exceeded the default retention.
+    # The just-written ack timestamp keeps this task out of the same sweep.
+    try:
+        collect_garbage(DEFAULT_GC_OLDER_THAN_HOURS)
+    except OSError:
+        # A cleanup failure must not turn a successful acknowledgement into a
+        # failed operation. The next ack or explicit gc can retry it.
+        pass
     print(json.dumps(task_status(task_dir), ensure_ascii=False))
     return 0
 
@@ -431,11 +441,9 @@ def clean(args: argparse.Namespace) -> int:
     return 0
 
 
-def gc(args: argparse.Namespace) -> int:
-    if args.older_than_hours < 0:
-        raise SystemExit("--older-than-hours cannot be negative")
+def collect_garbage(older_than_hours: float) -> list[str]:
     root = runtime_root()
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=args.older_than_hours)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
     removed: list[str] = []
     if root.is_dir():
         for metadata_path in root.glob("*/*/metadata.json"):
@@ -469,6 +477,13 @@ def gc(args: argparse.Namespace) -> int:
         for thread_dir in root.iterdir():
             if thread_dir.is_dir() and not any(thread_dir.iterdir()):
                 thread_dir.rmdir()
+    return removed
+
+
+def gc(args: argparse.Namespace) -> int:
+    if args.older_than_hours < 0:
+        raise SystemExit("--older-than-hours cannot be negative")
+    removed = collect_garbage(args.older_than_hours)
     print(json.dumps({"removed": removed, "count": len(removed)}, ensure_ascii=False))
     return 0
 
@@ -513,7 +528,7 @@ def parse_args() -> argparse.Namespace:
     clean_parser.add_argument("--force", action="store_true")
 
     gc_parser = subparsers.add_parser("gc")
-    gc_parser.add_argument("--older-than-hours", type=float, default=168.0)
+    gc_parser.add_argument("--older-than-hours", type=float, default=DEFAULT_GC_OLDER_THAN_HOURS)
     return parser.parse_args()
 
 

@@ -93,6 +93,10 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" a
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" disarm --task-dir <path>
 ```
 
+Acknowledging a completed task also performs a best-effort garbage collection
+of completed task state older than seven days. The acknowledged task is kept
+because its fresh acknowledgement timestamp starts a new retention window.
+
 ## Configuration
 
 Environment variables are read by the runner or Stop Hook:
@@ -139,7 +143,8 @@ intentionally abandoning incomplete work. Runtime evidence is retained unless
 - The Hook injects bounded completion metadata; complete output remains on disk.
 - Completion wakes are emitted once per registration and immediately disarm
   the wait. `ack` is an optional evidence marker; it does not control wake
-  retries or whether a completed task can be cleaned.
+  retries or whether a completed task can be cleaned. Calling `ack` also runs
+  the default seven-day completed-state garbage collection.
 - Exit code `124` means timeout, `125` means the worker disappeared, and `130` means cancellation.
 
 ## Development

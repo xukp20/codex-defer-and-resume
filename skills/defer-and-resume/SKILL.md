@@ -54,6 +54,10 @@ For a completion prompt:
    python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" ack --task-dir <path>
    ```
 
+   `ack` also performs a best-effort garbage collection of completed task
+   state older than seven days. The acknowledged task is retained because
+   its new ack timestamp starts a fresh retention window.
+
 3. Remove consumed state when it is no longer needed. Completed tasks can be
    cleaned directly, with or without `ack`:
 
