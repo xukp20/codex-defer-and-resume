@@ -29,16 +29,20 @@ While a command is still running, the Stop Hook performs a short cache-keepalive
 
 - Codex Desktop or another Codex surface that supports Stop Hooks
 - Python 3.9 or newer
-- macOS or Linux
-- The Codex app and task must remain open during the wait
+- Windows, macOS, or Linux
+- The Codex app and task must remain open for automatic same-task wakeups
 
 ## Install
 
 ```bash
-git clone https://github.com/zibo-chen/codex-defer-and-resume.git
+git clone https://github.com/xukp20/codex-defer-and-resume.git
 cd codex-defer-and-resume
 python3 install.py
 ```
+
+On Windows PowerShell, run `python install.py` instead. The installer writes
+both the portable Hook command and Codex's Windows-specific `commandWindows`
+override, using the Python interpreter that performed the installation.
 
 The installer:
 
@@ -74,6 +78,19 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" s
   -- ./gradlew assembleRelease
 ```
 
+On Windows, use the same argv-oriented interface from PowerShell:
+
+```powershell
+$defer = Join-Path $env:CODEX_HOME 'skills\defer-and-resume\scripts\defer.py'
+python $defer start --name 'release build' --cwd $PWD.Path --timeout 7200 -- cmd.exe /d /c gradlew.bat assembleRelease
+```
+
+The Windows worker is launched detached, in a new process group, and with a
+job breakaway flag. This keeps it independent from the invoking terminal or
+Codex tool process. Closing Codex still prevents the Stop Hook from waking the
+task automatically; reopen the same task and re-arm the registration if that
+happens.
+
 Useful operations:
 
 ```bash
@@ -83,7 +100,7 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" l
 # Inspect one result
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" inspect --task-dir <path>
 
-# Cancel a running command and its process group
+# Cancel a running command and its process tree
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" cancel --task-dir <path>
 
 # Re-arm an existing worker after a disabled keepalive window expired
@@ -139,7 +156,9 @@ intentionally abandoning incomplete work. Runtime evidence is retained unless
 - Deferred commands receive no interactive input or TTY.
 - Full command arguments are not stored in persistent metadata.
 - Command arguments may still be visible to the operating system while the command runs; do not place secrets in them.
-- Runtime directories are owner-only (`0700`), and state/log files are owner-only (`0600`).
+- On macOS and Linux, runtime directories are owner-only (`0700`) and
+  state/log files are owner-only (`0600`). On Windows, files inherit the
+  current user's profile ACLs.
 - The Hook injects bounded completion metadata; complete output remains on disk.
 - Completion wakes are emitted once per registration and immediately disarm
   the wait. `ack` is an optional evidence marker; it does not control wake

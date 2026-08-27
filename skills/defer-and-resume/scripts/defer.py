@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import shutil
@@ -86,6 +87,24 @@ def validate_task_dir(value: str) -> Path:
 def process_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if os.name == "nt":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+        kernel32.GetExitCodeProcess.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == 5
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return True
+            return exit_code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
         return True
@@ -93,6 +112,57 @@ def process_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+
+
+def detached_worker_options() -> dict[str, Any]:
+    if os.name == "posix":
+        return {"start_new_session": True}
+    if os.name == "nt":
+        return {
+            "creationflags": (
+                subprocess.CREATE_BREAKAWAY_FROM_JOB
+                | subprocess.CREATE_NEW_PROCESS_GROUP
+                | subprocess.DETACHED_PROCESS
+            )
+        }
+    raise SystemExit("defer-and-resume supports Windows, macOS, and Linux")
+
+
+def terminate_process_tree(pid: int, grace_seconds: float) -> None:
+    if os.name == "nt":
+        taskkill = shutil.which("taskkill.exe") or "taskkill.exe"
+        subprocess.run(
+            [taskkill, "/PID", str(pid), "/T"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        deadline = time.monotonic() + grace_seconds
+        while process_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if process_alive(pid):
+            subprocess.run(
+                [taskkill, "/PID", str(pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        return
+
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + grace_seconds
+    while process_alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if process_alive(pid):
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def create_log(path: Path) -> None:
@@ -221,8 +291,8 @@ def worker(task_dir: Path) -> int:
 
 
 def start(args: argparse.Namespace) -> int:
-    if os.name != "posix":
-        raise SystemExit("defer-and-resume currently supports macOS and Linux")
+    if os.name not in {"nt", "posix"}:
+        raise SystemExit("defer-and-resume supports Windows, macOS, and Linux")
     if not args.command:
         raise SystemExit("a command is required after --")
     command = args.command[1:] if args.command[0] == "--" else args.command
@@ -262,9 +332,9 @@ def start(args: argparse.Namespace) -> int:
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        start_new_session=True,
         close_fds=True,
         text=True,
+        **detached_worker_options(),
     )
     if child.stdin is None:
         raise SystemExit("failed to open worker command channel")
@@ -402,18 +472,7 @@ def cancel(args: argparse.Namespace) -> int:
     worker_info = read_json(task_dir / "worker.json")
     pid = int(worker_info.get("pid", 0))
     if process_alive(pid):
-        try:
-            os.killpg(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        deadline = time.monotonic() + args.grace_seconds
-        while process_alive(pid) and time.monotonic() < deadline:
-            time.sleep(0.05)
-        if process_alive(pid):
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        terminate_process_tree(pid, args.grace_seconds)
     write_result_if_absent(
         task_dir,
         {
@@ -437,6 +496,14 @@ def clean(args: argparse.Namespace) -> int:
     task_dir = validate_task_dir(args.task_dir)
     if not args.force and not (task_dir / "result.json").exists():
         raise SystemExit("refusing to clean an incomplete task; wait for completion or use --force")
+    worker_path = task_dir / "worker.json"
+    if worker_path.is_file():
+        pid = int(read_json(worker_path).get("pid", 0))
+        deadline = time.monotonic() + 2.0
+        while process_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not args.force and process_alive(pid):
+            raise SystemExit("refusing to clean while the completed worker is still exiting")
     shutil.rmtree(task_dir)
     return 0
 

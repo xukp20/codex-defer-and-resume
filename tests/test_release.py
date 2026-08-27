@@ -128,6 +128,14 @@ class InstallerTests(unittest.TestCase):
                 defer_user_prompt_hooks[0]["command"],
                 "a path containing spaces must be shell-quoted",
             )
+            for hook in (defer_stop_hooks[0], defer_user_prompt_hooks[0]):
+                self.assertIn("commandWindows", hook)
+                self.assertIn(str(Path(sys.executable)), hook["commandWindows"])
+                self.assertIn(
+                    '"',
+                    hook["commandWindows"],
+                    "a Windows path containing spaces must be quoted",
+                )
             self.assertTrue(any(hook.get("statusMessage") == "unrelated" for hook in stop_hook_entries))
             self.assertTrue(
                 any(hook.get("statusMessage") == "unrelated prompt" for hook in user_prompt_hook_entries)
@@ -224,7 +232,9 @@ class DeferredRuntimeTests(unittest.TestCase):
             "--timeout",
             timeout,
             "--",
-            "/bin/sleep",
+            sys.executable,
+            "-c",
+            "import sys, time; time.sleep(float(sys.argv[1]))",
             seconds,
             env=self.environment,
         )
@@ -247,6 +257,14 @@ class DeferredRuntimeTests(unittest.TestCase):
             input_text=json.dumps({"session_id": "test-thread"}),
         )
         return json.loads(completed.stdout)
+
+    def completion_hook(self, *, attempts: int = 10) -> dict[str, object]:
+        response = self.hook_call()
+        for _ in range(attempts):
+            if "Deferred work has completed" in str(response.get("reason")):
+                return response
+            response = self.hook_call(continuing=True)
+        self.fail(f"the task did not complete within {attempts + 1} bounded Hook intervals")
 
     def acknowledge_and_clean(self, task_dir: Path) -> None:
         run(sys.executable, str(self.defer), "ack", "--task-dir", str(task_dir), env=self.environment)
@@ -273,7 +291,7 @@ class DeferredRuntimeTests(unittest.TestCase):
 
     def test_completion_wake_is_one_shot(self) -> None:
         task_dir = self.start_task("0.01")
-        first = self.hook_call()
+        first = self.completion_hook()
         self.assertIn("Deferred work has completed", str(first["reason"]))
         first_wake = json.loads((task_dir / "wake.json").read_text(encoding="utf-8"))
         self.assertEqual(first_wake["attempt"], 1)
@@ -291,12 +309,12 @@ class DeferredRuntimeTests(unittest.TestCase):
 
     def test_rearm_starts_a_new_completion_registration(self) -> None:
         task_dir = self.start_task("0.01")
-        self.assertIn("Deferred work has completed", str(self.hook_call()["reason"]))
+        self.assertIn("Deferred work has completed", str(self.completion_hook()["reason"]))
         self.assertTrue((task_dir / "wake.json").exists())
 
         run(sys.executable, str(self.defer), "arm", "--task-dir", str(task_dir), env=self.environment)
         self.assertFalse((task_dir / "wake.json").exists())
-        self.assertIn("Deferred work has completed", str(self.hook_call()["reason"]))
+        self.assertIn("Deferred work has completed", str(self.completion_hook()["reason"]))
         wait = json.loads((task_dir / "wait.json").read_text(encoding="utf-8"))
         self.assertEqual(wait["state"], "disarmed")
         run(sys.executable, str(self.defer), "clean", "--task-dir", str(task_dir), env=self.environment)
@@ -336,7 +354,7 @@ class DeferredRuntimeTests(unittest.TestCase):
         )
 
         current_task = self.start_task("0.01")
-        self.assertIn("Deferred work has completed", str(self.hook_call()["reason"]))
+        self.assertIn("Deferred work has completed", str(self.completion_hook()["reason"]))
         run(sys.executable, str(self.defer), "ack", "--task-dir", str(current_task), env=self.environment)
 
         self.assertFalse(old_task.exists())
@@ -374,7 +392,16 @@ class DeferredRuntimeTests(unittest.TestCase):
         wait = json.loads((task_dir / "wait.json").read_text(encoding="utf-8"))
         self.assertEqual(wait["state"], "disarmed")
         self.assertEqual(wait["disarm_reason"], "user prompt interrupted wait")
-        os.kill(worker_pid, 0)
+        status = run(
+            sys.executable,
+            str(self.defer),
+            "status",
+            "--task-dir",
+            str(task_dir),
+            env=self.environment,
+        )
+        self.assertEqual(json.loads(status.stdout)["worker_pid"], worker_pid)
+        self.assertEqual(json.loads(status.stdout)["state"], "running")
 
         run(sys.executable, str(self.defer), "cancel", "--task-dir", str(task_dir), env=self.environment)
         self.acknowledge_and_clean(task_dir)
@@ -399,7 +426,11 @@ class DeferredRuntimeTests(unittest.TestCase):
             if wait["state"] == "waiting":
                 break
             if hook_process.poll() is not None:
-                self.fail(f"Stop Hook exited before entering wait: {hook_process.returncode}")
+                assert hook_process.stderr is not None
+                self.fail(
+                    f"Stop Hook exited before entering wait: {hook_process.returncode}\n"
+                    f"stderr:\n{hook_process.stderr.read()}"
+                )
             time.sleep(0.01)
         else:
             self.fail("Stop Hook did not enter waiting state")
@@ -427,7 +458,12 @@ class DeferredRuntimeTests(unittest.TestCase):
         wait = json.loads((task_dir / "wait.json").read_text(encoding="utf-8"))
         self.assertEqual(wait["state"], "expired")
 
-        self.environment["CODEX_DEFER_KEEPALIVE_SECONDS"] = "0.5"
+        for _ in range(100):
+            if (task_dir / "result.json").exists():
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("the worker did not finish after the disabled keepalive window expired")
         run(sys.executable, str(self.defer), "arm", "--task-dir", str(task_dir), env=self.environment)
         completion = self.hook_call()
         self.assertIn("Deferred work has completed", str(completion["reason"]))

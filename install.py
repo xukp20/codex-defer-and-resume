@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -48,7 +49,9 @@ def write_json_atomic(path: Path, value: dict[str, Any]) -> None:
 def is_defer_hook(hook: Any) -> bool:
     if not isinstance(hook, dict):
         return False
-    command = str(hook.get("command", ""))
+    command = "\n".join(
+        str(hook.get(key, "")) for key in ("command", "commandWindows", "command_windows")
+    )
     return hook.get("statusMessage") in {
         HOOK_STATUS,
         "Waiting for deferred work with periodic cache keepalive",
@@ -119,12 +122,14 @@ def install_hook(
     stop_groups = remove_existing_hook_groups(hooks.get("Stop", []))
     user_prompt_groups = remove_existing_hook_groups(hooks.get("UserPromptSubmit", []))
     stop_command = f"/usr/bin/env python3 {shlex.quote(str(stop_script_path))}"
+    stop_command_windows = subprocess.list2cmdline([sys.executable, str(stop_script_path)])
     stop_groups.append(
         {
             "hooks": [
                 {
                     "type": "command",
                     "command": stop_command,
+                    "commandWindows": stop_command_windows,
                     "async": False,
                     "timeout": 3700,
                     "statusMessage": HOOK_STATUS,
@@ -133,12 +138,16 @@ def install_hook(
         }
     )
     user_prompt_command = f"/usr/bin/env python3 {shlex.quote(str(user_prompt_script_path))}"
+    user_prompt_command_windows = subprocess.list2cmdline(
+        [sys.executable, str(user_prompt_script_path)]
+    )
     user_prompt_groups.append(
         {
             "hooks": [
                 {
                     "type": "command",
                     "command": user_prompt_command,
+                    "commandWindows": user_prompt_command_windows,
                     "async": False,
                     "timeout": 10,
                     "statusMessage": USER_PROMPT_HOOK_STATUS,
@@ -175,8 +184,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
-    if os.name != "posix":
-        raise SystemExit("defer-and-resume currently supports macOS and Linux")
+    if os.name not in {"nt", "posix"}:
+        raise SystemExit("defer-and-resume supports Windows, macOS, and Linux")
     args = parse_args()
     codex_home = args.codex_home.expanduser().resolve()
     repository_root = Path(__file__).resolve().parent

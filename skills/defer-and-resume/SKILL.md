@@ -27,6 +27,10 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" s
   -- command arg1 arg2
 ```
 
+On Windows PowerShell, resolve the same script from `$env:CODEX_HOME` and run
+it with `python`. The runner accepts an argv array on every platform; use
+`cmd.exe /d /c` only when a Windows batch file or shell syntax requires it.
+
 Then finish the current turn. Do not poll with model tool calls. Keep Codex Desktop and the current task open so the Stop Hook can wait and resume it.
 
 `--timeout` is optional and limits the command itself. The Hook observation interval is separate.
@@ -79,7 +83,7 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" l
 # One registration
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" status --task-dir <path>
 
-# Stop a running command and its process group
+# Stop a running command and its process tree
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" cancel --task-dir <path>
 
 # Re-arm a worker after an expired or interrupted wait
@@ -103,6 +107,10 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" g
 - Override the keepalive interval with `CODEX_DEFER_KEEPALIVE_SECONDS` only when provider evidence justifies it. Leave a safety margin below the measured cache horizon.
 - A missing worker produces exit code `125`, a command timeout `124`, and cancellation `130`.
 - Do not force-clean incomplete state unless recovery is intentionally abandoned.
+- On Windows, the detached worker survives the invoking terminal or tool
+  process. Codex Desktop and the task must still remain open for the Stop Hook
+  to wake the model automatically; after an app restart, inspect and re-arm
+  the registration from the same task.
 
 ## Bundled scripts
 
