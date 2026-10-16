@@ -23,7 +23,7 @@ the command writes result.json
 the Hook resumes the same Codex task
 ```
 
-While a command is still running, the Stop Hook performs a short cache-keepalive wake every 25 minutes by default. The agent immediately ends that turn and the same registration automatically re-enters local waiting on the continuation turn; no second `start` call is needed. A synchronous `UserPromptSubmit` Hook disarms the registration as soon as a new user message arrives, while leaving the worker running. The Stop Hook retains a fallback disarm path for interrupted or stale waits. Completion is a one-shot wake. The interval is a provider-specific heuristic, not an OpenAI guarantee.
+While a command is still running, the Stop Hook performs a short cache-keepalive wake every 25 minutes by default. Unless an actionable worker message has already arrived, the agent immediately ends that turn and the same registration automatically re-enters local waiting on the continuation turn; no second `start` call is needed. Existing blockers should be handled instead of returning to waiting. A synchronous `UserPromptSubmit` Hook disarms the registration as soon as a new user message arrives, while leaving the worker running. The Stop Hook retains a fallback disarm path for interrupted or stale waits. Completion is a one-shot wake. The interval is a provider-specific heuristic, not an OpenAI guarantee.
 
 ## Requirements
 
@@ -177,3 +177,32 @@ python3 -m py_compile skills/defer-and-resume/scripts/defer.py \
 ```
 
 The Codex Skill validator can additionally validate `skills/defer-and-resume` when `PyYAML` is available.
+
+## Intervention and bounded waiting
+
+Use `start --review-after 1800` to request a review after 30 minutes of armed
+waiting, without killing the command. Keepalives do not reset this deadline;
+explicit `arm` starts a fresh review period. This differs from `--timeout`,
+which limits command execution. Both are optional.
+
+A worker can publish an explicit blocker:
+
+```bash
+python3 "$HOME/.codex/skills/defer-and-resume/scripts/defer.py" attention \
+  --task-dir /path/to/task --reason "Upstream failed; recovery needed" \
+  --evidence-path /path/to/receipt.json
+```
+
+Attention events are immutable and consumed once. The Hook combines a
+simultaneously observed completion and attention in one wake, disarms waiting,
+and does not kill the worker. New events on a disarmed task wait for `arm`.
+Avoid secrets in notification text and paths. This is an explicit signal API,
+not automatic agent-mailbox or workflow-DAG monitoring.
+
+Use `start --no-hook` for background-only commands: no automatic waiting or
+wakeups until explicitly armed. This preserves the locally deployed behavior.
+
+For dependent workflows, wait for the current stage's success, failure or need
+for intervention, not for all downstream result files. A completed failure is
+not permission to run the next success-dependent stage. Existing actionable
+worker messages take precedence over a routine keepalive's no-poll guidance.

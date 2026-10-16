@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import math
 import os
 import shutil
 import signal
@@ -189,11 +190,14 @@ def read_wait_state(task_dir: Path) -> dict[str, Any]:
         value = read_json(path)
         if not isinstance(value.get("state"), str):
             raise ValueError(f"{path} must contain a string state")
+        consumed = value.get("consumed_attention_ids", [])
+        if not isinstance(consumed, list) or not all(isinstance(event_id, str) for event_id in consumed):
+            raise ValueError(f"{path} consumed_attention_ids must be a list of strings")
         return value
     metadata = read_json(task_dir / "metadata.json")
     value = {
         "version": 1,
-        "state": WAIT_ARMED,
+        "state": WAIT_ARMED if metadata.get("wait_on_start", True) else WAIT_DISARMED,
         "armed_at": metadata.get("registered_at", now_iso()),
         "updated_at": now_iso(),
     }
@@ -300,6 +304,8 @@ def start(args: argparse.Namespace) -> int:
         raise SystemExit("a command is required after --")
     if args.timeout is not None and args.timeout <= 0:
         raise SystemExit("--timeout must be greater than zero")
+    if args.review_after is not None and (not math.isfinite(args.review_after) or args.review_after <= 0):
+        raise SystemExit("--review-after must be a finite number greater than zero")
 
     current_thread = thread_id()
     task_id = uuid.uuid4().hex
@@ -321,10 +327,21 @@ def start(args: argparse.Namespace) -> int:
             "executable": Path(command[0]).name,
             "argument_count": max(0, len(command) - 1),
             "timeout_seconds": args.timeout,
+            "review_after_seconds": args.review_after,
+            "wait_on_start": not args.no_hook,
             "registered_at": now_iso(),
         },
     )
-    update_wait_state(task_dir, WAIT_ARMED, armed_at=now_iso())
+    armed_at = now_iso()
+    update_wait_state(
+        task_dir,
+        WAIT_DISARMED if args.no_hook else WAIT_ARMED,
+        armed_at=armed_at,
+        disarmed_at=armed_at if args.no_hook else None,
+        disarm_reason="started without hook waiting" if args.no_hook else None,
+        review_deadline_at=(parse_iso(armed_at) + timedelta(seconds=args.review_after)).isoformat()
+        if args.review_after is not None and not args.no_hook else None,
+    )
     create_log(task_dir / "output.log")
 
     child = subprocess.Popen(
@@ -388,6 +405,7 @@ def inspect(args: argparse.Namespace) -> int:
         path = task_dir / name
         if path.exists():
             value[name.removesuffix(".json")] = read_json(path)
+    value["attention"] = [read_json(path) for path in sorted((task_dir / "attention").glob("*.json"))]
     print(json.dumps(value, ensure_ascii=False, indent=2))
     return 0
 
@@ -439,10 +457,15 @@ def arm(args: argparse.Namespace) -> int:
     # A deliberate re-arm starts a new one-shot registration. The previous
     # wake marker belongs to the old registration and must not be reused.
     (task_dir / "wake.json").unlink(missing_ok=True)
+    armed_at = now_iso()
+    review_after = read_json(task_dir / "metadata.json").get("review_after_seconds")
     update_wait_state(
         task_dir,
         WAIT_ARMED,
-        armed_at=now_iso(),
+        armed_at=armed_at,
+        wait_started_at=None,
+        review_deadline_at=(parse_iso(armed_at) + timedelta(seconds=review_after)).isoformat()
+        if review_after is not None else None,
         disarmed_at=None,
         disarm_reason=None,
         wake_emitted_at=None,
@@ -450,6 +473,26 @@ def arm(args: argparse.Namespace) -> int:
         completion_exit_code=None,
     )
     print(json.dumps(task_status(task_dir), ensure_ascii=False))
+    return 0
+
+
+def attention(args: argparse.Namespace) -> int:
+    task_dir = validate_task_dir(args.task_dir)
+    if not args.reason.strip():
+        raise SystemExit("--reason must not be empty")
+    metadata = read_json(task_dir / "metadata.json")
+    event_id = uuid.uuid4().hex
+    event_path = task_dir / "attention" / f"{event_id}.json"
+    event = {
+        "event_id": event_id,
+        "task_id": metadata["task_id"],
+        "created_at": now_iso(),
+        "reason": args.reason,
+        "evidence_path": str(Path(args.evidence_path).expanduser().resolve()) if args.evidence_path else None,
+    }
+    # Every publication has a unique path; consumption never changes this receipt.
+    write_json_atomic(event_path, event)
+    print(json.dumps({**event, "event_path": str(event_path)}, ensure_ascii=False))
     return 0
 
 
@@ -563,6 +606,11 @@ def parse_args() -> argparse.Namespace:
     start_parser.add_argument("--name", required=True)
     start_parser.add_argument("--cwd", default=os.getcwd())
     start_parser.add_argument("--timeout", type=float)
+    start_parser.add_argument("--review-after", type=float)
+    start_parser.add_argument(
+        "--no-hook", action="store_true",
+        help="run in the background without Stop Hook waiting or completion wakes; use arm later to enable waiting",
+    )
     start_parser.add_argument("command", nargs=argparse.REMAINDER)
 
     worker_parser = subparsers.add_parser("_worker")
@@ -582,6 +630,11 @@ def parse_args() -> argparse.Namespace:
 
     arm_parser = subparsers.add_parser("arm")
     arm_parser.add_argument("--task-dir", required=True)
+
+    attention_parser = subparsers.add_parser("attention")
+    attention_parser.add_argument("--task-dir", required=True)
+    attention_parser.add_argument("--reason", required=True)
+    attention_parser.add_argument("--evidence-path")
 
     disarm_parser = subparsers.add_parser("disarm")
     disarm_parser.add_argument("--task-dir", required=True)
@@ -615,6 +668,8 @@ def main() -> int:
         return acknowledge(args)
     if args.action == "arm":
         return arm(args)
+    if args.action == "attention":
+        return attention(args)
     if args.action == "disarm":
         return disarm(args)
     if args.action == "cancel":

@@ -20,6 +20,7 @@ WAIT_DISARMED = "disarmed"
 WAIT_EXPIRED = "expired"
 WAIT_CANCELLED = "cancelled"
 RESULT_STALE_WORKER = 125
+RECORD_ERRORS = (OSError, ValueError, TypeError, KeyError, OverflowError)
 
 
 def positive_seconds(name: str, default: float, fallback_name: str | None = None) -> float:
@@ -156,11 +157,14 @@ def read_wait(task: Path) -> dict[str, Any]:
         value = read_json(path)
         if not isinstance(value.get("state"), str):
             raise ValueError(f"{path} must contain a string state")
+        consumed = value.get("consumed_attention_ids", [])
+        if not isinstance(consumed, list) or not all(isinstance(event_id, str) for event_id in consumed):
+            raise ValueError(f"{path} consumed_attention_ids must be a list of strings")
         return value
     metadata = read_json(task / "metadata.json")
     value = {
         "version": 1,
-        "state": WAIT_ARMED,
+        "state": WAIT_ARMED if metadata.get("wait_on_start", True) else WAIT_DISARMED,
         "armed_at": metadata.get("registered_at", now_iso()),
         "updated_at": now_iso(),
     }
@@ -210,8 +214,14 @@ def task_dirs(thread_dir: Path) -> list[Path]:
     for child in sorted(thread_dir.iterdir()):
         if not child.is_dir() or not (child / "metadata.json").exists():
             continue
-        synthesize_stale_result(child)
-        tasks.append(child)
+        try:
+            read_json(child / "metadata.json")
+            synthesize_stale_result(child)
+            read_wait(child)
+            tasks.append(child)
+        except RECORD_ERRORS:
+            # One damaged registration must not hide healthy tasks.
+            continue
     return tasks
 
 
@@ -219,44 +229,83 @@ def prepare_wait(tasks: list[Path], hook_input: dict[str, Any]) -> list[Path]:
     continuing = stop_hook_active(hook_input)
     prepared: list[Path] = []
     for task in tasks:
-        wait = read_wait(task)
-        state = wait.get("state")
-        if continuing:
-            if state == WAIT_COMPLETION_PENDING:
-                update_wait(task, WAIT_DISARMED, completed_continuation_at=now_iso())
-                continue
-            if state == WAIT_KEEPALIVE_PENDING:
-                state = WAIT_ARMED
-            if state not in {WAIT_ARMED, WAIT_WAITING}:
-                continue
-        else:
-            # A new, non-continuation turn means the previous Hook wait was
-            # interrupted. Do not silently re-enter the wait on that turn.
-            if state in {WAIT_WAITING, WAIT_KEEPALIVE_PENDING, WAIT_COMPLETION_PENDING}:
-                update_wait(task, WAIT_DISARMED, disarmed_at=now_iso(), disarm_reason="wait interrupted")
-                continue
-            if state != WAIT_ARMED:
-                continue
-
-        fields: dict[str, Any] = {
-            "hook_pid": os.getpid(),
-            "hook_started_at": now_iso(),
-            "hook_turn_id": hook_input.get("turn_id"),
-        }
-        if not wait.get("wait_started_at"):
-            fields["wait_started_at"] = now_iso()
-        update_wait(task, WAIT_WAITING, **fields)
-        prepared.append(task)
+        try:
+            if prepare_task(task, hook_input, continuing):
+                prepared.append(task)
+        except RECORD_ERRORS:
+            continue
     return prepared
 
 
-def emit_completion(tasks: list[Path]) -> None:
+def prepare_task(task: Path, hook_input: dict[str, Any], continuing: bool) -> bool:
+    wait = read_wait(task)
+    state = wait.get("state")
+    if continuing:
+        if state == WAIT_COMPLETION_PENDING:
+            update_wait(task, WAIT_DISARMED, completed_continuation_at=now_iso())
+            return False
+        if state == WAIT_KEEPALIVE_PENDING:
+            state = WAIT_ARMED
+        if state not in {WAIT_ARMED, WAIT_WAITING}:
+            return False
+    else:
+        # A new, non-continuation turn means the previous Hook wait was
+        # interrupted. Do not silently re-enter the wait on that turn.
+        if state in {WAIT_WAITING, WAIT_KEEPALIVE_PENDING, WAIT_COMPLETION_PENDING}:
+            update_wait(task, WAIT_DISARMED, disarmed_at=now_iso(), disarm_reason="wait interrupted")
+            return False
+        if state != WAIT_ARMED:
+            return False
+
+    fields: dict[str, Any] = {
+        "hook_pid": os.getpid(),
+        "hook_started_at": now_iso(),
+        "hook_turn_id": hook_input.get("turn_id"),
+    }
+    if not wait.get("wait_started_at"):
+        fields["wait_started_at"] = now_iso()
+    update_wait(task, WAIT_WAITING, **fields)
+    return True
+
+
+def pending_attention(task: Path, wait: dict[str, Any]) -> list[dict[str, Any]]:
+    consumed = set(wait.get("consumed_attention_ids", []))
+    events: list[dict[str, Any]] = []
+    metadata = read_json(task / "metadata.json")
+    for path in sorted((task / "attention").glob("*.json")):
+        try:
+            event = read_json(path)
+            if (event.get("event_id") != path.stem or event.get("task_id") != metadata.get("task_id")
+                    or not isinstance(event.get("reason"), str)):
+                continue
+            if event["event_id"] not in consumed:
+                events.append(event)
+        except RECORD_ERRORS:
+            continue
+    return events
+
+
+def review_due(wait: dict[str, Any]) -> bool:
+    deadline = wait.get("review_deadline_at")
+    if deadline is not None and not isinstance(deadline, str):
+        raise ValueError("review_deadline_at must be an ISO timestamp")
+    return bool(deadline) and datetime.now(timezone.utc) >= datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+
+
+def emit_notifications(notifications: list[tuple[Path, dict[str, Any] | None, list[dict[str, Any]], bool]]) -> None:
     summaries: list[str] = []
-    for task in tasks:
+    has_completion = False
+    has_attention = False
+    for task, result, events, expired in notifications:
         metadata = read_json(task / "metadata.json")
-        result = read_json(task / "result.json")
+        wait = read_wait(task)
+        if wait.get("state") != WAIT_WAITING:
+            continue
         wake_path = task / "wake.json"
         emitted_at = now_iso()
+        has_completion = has_completion or result is not None
+        has_attention = has_attention or bool(events) or expired
+        consumed = list(dict.fromkeys(wait.get("consumed_attention_ids", []) + [event["event_id"] for event in events]))
         if not wake_path.exists():
             write_json_atomic(
                 wake_path,
@@ -264,27 +313,41 @@ def emit_completion(tasks: list[Path]) -> None:
                     "emitted_at": emitted_at,
                     "emitted": True,
                     "attempt": 1,
-                    "exit_code": result.get("exit_code"),
+                    "exit_code": result.get("exit_code") if result is not None else None,
+                    "attention_event_ids": [event["event_id"] for event in events],
+                    "review_expired": expired,
                 },
             )
         update_wait(
             task,
             WAIT_DISARMED,
             wake_emitted_at=emitted_at,
-            completion_exit_code=result.get("exit_code"),
+            completion_exit_code=result.get("exit_code") if result is not None else None,
+            consumed_attention_ids=consumed,
             disarmed_at=emitted_at,
-            disarm_reason="completion wake emitted",
+            disarm_reason="action required wake emitted" if events or expired else "completion wake emitted",
         )
-        summaries.append(
-            f"{metadata.get('name', task.name)} completed with exit code {result.get('exit_code')}; "
-            f"task directory: {task}"
-        )
+        name = metadata.get("name", task.name)
+        if result is not None:
+            summaries.append(f"{name} completed with exit code {result.get('exit_code')}; task directory: {task}")
+        for event in events:
+            summaries.append(f"{name}: action required: {event['reason']}; event ID: {event['event_id']}; "
+                             f"evidence path: {event.get('evidence_path')}; task directory: {task}")
+        if expired:
+            summaries.append(f"{name}: review deadline reached ({wait['review_deadline_at']}); task directory: {task}")
+    instructions: list[str] = []
+    if not summaries:
+        emit({"continue": True})
+        return
+    if has_completion:
+        instructions.append("Deferred work has completed. Read result.json and only the necessary portion of output.log, then continue the original task.")
+    if has_attention:
+        instructions.append("Action required: handle the attention signal or review the wait deadline. Workers are not cancelled.")
+    instructions.append("The notified registrations are disarmed. Run defer.py arm --task-dir <path> explicitly to wait again; cleanup is optional.")
     emit(
         {
             "decision": "block",
-            "reason": "Deferred work has completed. Read result.json and only the necessary portion of "
-            "output.log, then continue the original task. The completion wake is already disarmed; "
-            "cleanup is optional.\n" + "\n".join(summaries),
+            "reason": " ".join(instructions) + "\n" + "\n".join(summaries),
         }
     )
 
@@ -292,17 +355,28 @@ def emit_completion(tasks: list[Path]) -> None:
 def emit_keepalive(tasks: list[Path]) -> None:
     names: list[str] = []
     for task in tasks:
-        wait = read_wait(task)
-        keepalive_count = int(wait.get("keepalive_count", 0)) + 1
-        update_wait(task, WAIT_KEEPALIVE_PENDING, keepalive_count=keepalive_count, last_keepalive_at=now_iso())
-        names.append(str(read_json(task / "metadata.json").get("name", task.name)))
+        try:
+            wait = read_wait(task)
+            if wait.get("state") != WAIT_WAITING:
+                continue
+            keepalive_count = int(wait.get("keepalive_count", 0)) + 1
+            name = str(read_json(task / "metadata.json").get("name", task.name))
+            update_wait(task, WAIT_KEEPALIVE_PENDING, keepalive_count=keepalive_count, last_keepalive_at=now_iso())
+            names.append(name)
+        except RECORD_ERRORS:
+            continue
+    if not names:
+        emit({"continue": True})
+        return
     emit(
         {
             "decision": "block",
             "reason": "Cache keepalive wake: deferred work is still running: "
             + ", ".join(names)
-            + ". Do not poll, inspect logs, or call status commands. End this turn immediately "
-            + "with the shortest useful response; the same deferred registration will automatically "
+            + ". If you have already received an actionable subagent failure, blocked, or decision "
+            + "message, disarm the affected wait and handle it now. Otherwise, do not poll, inspect "
+            + "logs, or call status commands; end this turn immediately with the shortest useful "
+            + "response. The same deferred registration will automatically "
             + "re-enter local waiting on the continuation turn.",
         }
     )
@@ -311,8 +385,17 @@ def emit_keepalive(tasks: list[Path]) -> None:
 def emit_expired(tasks: list[Path]) -> None:
     names: list[str] = []
     for task in tasks:
-        update_wait(task, WAIT_EXPIRED, expired_at=now_iso(), expire_reason="Hook wait window expired")
-        names.append(str(read_json(task / "metadata.json").get("name", task.name)))
+        try:
+            if read_wait(task).get("state") != WAIT_WAITING:
+                continue
+            name = str(read_json(task / "metadata.json").get("name", task.name))
+            update_wait(task, WAIT_EXPIRED, expired_at=now_iso(), expire_reason="Hook wait window expired")
+            names.append(name)
+        except RECORD_ERRORS:
+            continue
+    if not names:
+        emit({"continue": True})
+        return
     emit(
         {
             "continue": True,
@@ -343,14 +426,28 @@ def main() -> int:
 
     deadline = time.monotonic() + KEEPALIVE_SECONDS
     while True:
-        tasks = [task for task in prepared if read_wait(task).get("state") == WAIT_WAITING]
+        tasks: list[Path] = []
+        notifications = []
+        for task in prepared:
+            try:
+                wait = read_wait(task)
+                if wait.get("state") != WAIT_WAITING:
+                    continue
+                synthesize_stale_result(task)
+                result = read_json(task / "result.json") if (task / "result.json").exists() else None
+                events = pending_attention(task, wait)
+                expired = review_due(wait)
+                if result is not None or events or expired:
+                    notifications.append((task, result, events, expired))
+                tasks.append(task)
+            except RECORD_ERRORS:
+                continue
         if not tasks:
             emit({"continue": True})
             return 0
 
-        completed = [task for task in tasks if (task / "result.json").exists()]
-        if completed:
-            emit_completion(completed)
+        if notifications:
+            emit_notifications(notifications)
             return 0
 
         remaining = deadline - time.monotonic()
@@ -361,7 +458,8 @@ def main() -> int:
                 emit_expired(tasks)
             return 0
 
-        time.sleep(min(POLL_SECONDS, max(0.01, remaining)))
+        # Recheck worker liveness locally even when the configured poll is long.
+        time.sleep(min(POLL_SECONDS, 1.0, max(0.01, remaining)))
 
 
 if __name__ == "__main__":

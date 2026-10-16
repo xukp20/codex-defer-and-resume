@@ -11,6 +11,7 @@ from stop_hook import (
     WAIT_DISARMED,
     WAIT_KEEPALIVE_PENDING,
     WAIT_WAITING,
+    RECORD_ERRORS,
     current_thread,
     emit,
     now_iso,
@@ -56,7 +57,7 @@ def disarm_user_waits(thread: str) -> None:
                 disarmed_at=now_iso(),
                 disarm_reason="user prompt interrupted wait",
             )
-        except (OSError, ValueError, json.JSONDecodeError):
+        except RECORD_ERRORS:
             continue
 
 
