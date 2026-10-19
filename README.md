@@ -1,29 +1,46 @@
 # Codex Defer and Resume
 
-Run long-lived commands without model polling, periodically preserve prompt-cache locality, and resume the same Codex task when work completes.
+Run long-lived commands as independent workers with persistent logs and results, with optional same-task completion wakes.
 
-`defer-and-resume` is a service-independent Codex Skill plus lifecycle Hooks. The agent decides which command represents terminal completion; the implementation only watches that command and wakes the same task when it exits.
+`defer-and-resume` is a service-independent Codex Skill plus lifecycle Hooks. The agent decides which command represents terminal completion. With Hooks armed, the implementation watches that command and resumes the model when it exits; `start --no-hook` runs it independently for later inspection.
 
 > [!IMPORTANT]
 > This is an unofficial, experimental Codex extension. Prompt-cache behavior is provider-specific, and process completion is not proof that a wider deployment or business workflow succeeded.
 
 ## Why
 
-Long builds, CI runs, deployments, migrations, and artifact jobs often spend most of their time waiting. Repeated model polling wastes tokens. This project moves the wait into a local Python process:
+Prefer Codex's native background commands for ordinary background execution:
+`exec_command` can return a session ID and `write_stdin` can retrieve subsequent
+output. This runner is useful when you need an independent worker, a named
+task directory, and persistent logs and result files.
+
+Use `start --no-hook` to keep the conversation available while a worker runs.
+Query it with `list`, `status`, or `inspect` during an active turn. It does not
+automatically wake an idle model or make it periodically check the worker.
+
+Use the default Hook-enabled mode when automatic continuation is needed. Long
+builds, CI runs, deployments, migrations, and artifact jobs often spend most
+of their time waiting. This mode moves the wait into a local Python process:
 
 ```text
 Codex starts a detached command
         ↓
-the current turn ends
+the assistant finishes its response
         ↓
-the Stop Hook waits locally without model calls
+the synchronous Stop Hook waits, keeping the Codex turn active
         ↓
 the command writes result.json
         ↓
-the Hook resumes the same Codex task
+the Hook continues the model in the same Codex task
 ```
 
-While a command is still running, the Stop Hook performs a short cache-keepalive wake every 25 minutes by default. Unless an actionable worker message has already arrived, the agent immediately ends that turn and the same registration automatically re-enters local waiting on the continuation turn; no second `start` call is needed. Existing blockers should be handled instead of returning to waiting. A synchronous `UserPromptSubmit` Hook disarms the registration as soon as a new user message arrives, while leaving the worker running. The Stop Hook retains a fallback disarm path for interrupted or stale waits. Completion is a one-shot wake. The interval is a provider-specific heuristic, not an OpenAI guarantee.
+While a command is still running, the Stop Hook performs a short cache-keepalive wake every 25 minutes by default. Unless an actionable worker message has already arrived, the agent immediately finishes its response and the same registration automatically re-enters local waiting on the continuation; no second `start` call is needed. Existing blockers should be handled instead of returning to waiting. Completion is a one-shot wake. The interval is a provider-specific heuristic, not an OpenAI guarantee.
+
+Steer sent during a synchronous Stop Hook can remain queued until that Hook
+returns. `UserPromptSubmit` disarms waits when Codex consumes a user prompt;
+it is not an immediate message-arrival callback. See
+[Messages and interruptions](#messages-and-interruptions) before using this
+mode in a conversation that needs prompt interaction.
 
 ## Requirements
 
@@ -114,6 +131,22 @@ Acknowledging a completed task also performs a best-effort garbage collection
 of completed task state older than seven days. The acknowledged task is kept
 because its fresh acknowledgement timestamp starts a new retention window.
 
+## Messages and interruptions
+
+Stopping a waiting turn ends its Stop Hook, while the independent worker
+continues. A subsequent consumed user prompt disarms the wait through
+`UserPromptSubmit`; the next non-continuation Stop Hook also disarms stale
+waiting state as a fallback. Interruption may clear pending steer, so resend
+any message that was not processed.
+
+To preserve queued input, run `defer.py disarm --task-dir <path>` from a
+separate terminal or another active context, using the waiting task's
+`CODEX_HOME` and any `CODEX_DEFER_RUNTIME` override. The waiting Hook observes the
+disarmed state and returns without cancelling the worker. If multiple armed
+registrations keep the conversation waiting, disarm all of them. Query results
+afterward with `status` or `inspect`, or explicitly `arm` to wait again. Use
+`cancel` to stop the worker itself.
+
 ## Configuration
 
 Environment variables are read by the runner or Stop Hook:
@@ -129,7 +162,7 @@ Environment variables are read by the runner or Stop Hook:
 
 Keep the cache-keepalive interval below the cache horizon measured for your provider. Lower values cause more model calls; higher values increase the risk of a cold prompt.
 
-The Stop Hook uses the `stop_hook_active` field supplied by Codex to distinguish an automatic continuation from a new user turn. The `UserPromptSubmit` Hook handles the immediate user-input path and disarms active registrations before the new prompt is processed. A normal continuation keeps the registration armed; the worker is never cancelled by an interrupt unless the agent explicitly runs `cancel`. There is no retry loop for a delivered completion wake.
+The Stop Hook uses the `stop_hook_active` field supplied by Codex to distinguish an automatic continuation from a new user turn. `UserPromptSubmit` disarms active registrations when Codex consumes user input, subject to the synchronous-wait limitation above. A normal continuation keeps the registration armed. Stopping the turn does not cancel the worker; `cancel` explicitly stops it. There is no retry loop for a delivered completion wake.
 
 ## Update
 
@@ -175,6 +208,11 @@ python3 -m py_compile skills/defer-and-resume/scripts/defer.py \
   skills/defer-and-resume/scripts/user_prompt_hook.py \
   install.py uninstall.py
 ```
+
+The interruption regression test kills an isolated Stop Hook process, invokes
+the user-prompt Hook, and checks that the original worker completes naturally
+with its log and result intact. It does not simulate Desktop's UI or assert
+that steer invokes the user-prompt Hook while Stop is waiting.
 
 The Codex Skill validator can additionally validate `skills/defer-and-resume` when `PyYAML` is available.
 

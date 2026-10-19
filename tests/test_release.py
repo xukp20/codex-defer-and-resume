@@ -407,46 +407,136 @@ class DeferredRuntimeTests(unittest.TestCase):
         self.acknowledge_and_clean(task_dir)
 
     def test_user_prompt_recovers_a_killed_stop_hook(self) -> None:
-        task_dir = self.start_task("2")
-        self.environment["CODEX_DEFER_KEEPALIVE_SECONDS"] = "10"
-        hook_process = subprocess.Popen(
-            [sys.executable, str(self.hook)],
-            cwd=REPOSITORY_ROOT,
+        ready_path = Path(self.temporary.name) / "worker-ready"
+        release_path = Path(self.temporary.name) / "release-worker"
+        artifact_path = Path(self.temporary.name) / "worker-result.txt"
+        started = run(
+            sys.executable,
+            str(self.defer),
+            "start",
+            "--name",
+            "interrupted wait task",
+            "--cwd",
+            str(REPOSITORY_ROOT),
+            "--timeout",
+            "120",
+            "--",
+            sys.executable,
+            "-c",
+            "import sys, time\n"
+            "from pathlib import Path\n"
+            "print('worker started', flush=True)\n"
+            "Path(sys.argv[1]).write_text('ready', encoding='utf-8')\n"
+            "while not Path(sys.argv[2]).exists():\n"
+            "    time.sleep(0.01)\n"
+            "Path(sys.argv[3]).write_text('original result', encoding='utf-8')\n"
+            "print('worker finished', flush=True)\n",
+            str(ready_path),
+            str(release_path),
+            str(artifact_path),
             env=self.environment,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
         )
-        assert hook_process.stdin is not None
-        hook_process.stdin.write(json.dumps({"stop_hook_active": False}))
-        hook_process.stdin.close()
-        for _ in range(100):
+        task_dir = Path(json.loads(started.stdout)["task_dir"])
+        worker_pid = json.loads(started.stdout)["worker_pid"]
+        hook_process: subprocess.Popen[str] | None = None
+        try:
+            deadline = time.monotonic() + 5
+            while not ready_path.exists():
+                if time.monotonic() >= deadline:
+                    self.fail("detached worker did not reach the release barrier")
+                time.sleep(0.01)
+
+            self.environment["CODEX_DEFER_KEEPALIVE_SECONDS"] = "60"
+            hook_process = subprocess.Popen(
+                [sys.executable, str(self.hook)],
+                cwd=REPOSITORY_ROOT,
+                env=self.environment,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            assert hook_process.stdin is not None
+            hook_process.stdin.write(json.dumps({"stop_hook_active": False}))
+            hook_process.stdin.close()
+            deadline = time.monotonic() + 5
+            while True:
+                wait = json.loads((task_dir / "wait.json").read_text(encoding="utf-8"))
+                if wait["state"] == "waiting":
+                    break
+                if hook_process.poll() is not None:
+                    assert hook_process.stderr is not None
+                    self.fail(
+                        f"Stop Hook exited before entering wait: {hook_process.returncode}\n"
+                        f"stderr:\n{hook_process.stderr.read()}"
+                    )
+                if time.monotonic() >= deadline:
+                    self.fail("Stop Hook did not enter waiting state")
+                time.sleep(0.01)
+
+            hook_process.kill()
+            hook_process.wait(timeout=5)
+            self.assertEqual(self.user_prompt_hook_call(), {"continue": True})
             wait = json.loads((task_dir / "wait.json").read_text(encoding="utf-8"))
-            if wait["state"] == "waiting":
-                break
-            if hook_process.poll() is not None:
-                assert hook_process.stderr is not None
-                self.fail(
-                    f"Stop Hook exited before entering wait: {hook_process.returncode}\n"
-                    f"stderr:\n{hook_process.stderr.read()}"
-                )
-            time.sleep(0.01)
-        else:
-            self.fail("Stop Hook did not enter waiting state")
+            self.assertEqual(wait["state"], "disarmed")
+            self.assertEqual(wait["disarm_reason"], "user prompt interrupted wait")
+            status = json.loads(
+                run(
+                    sys.executable, str(self.defer), "status", "--task-dir", str(task_dir),
+                    env=self.environment,
+                ).stdout
+            )
+            self.assertEqual(status["worker_pid"], worker_pid)
+            self.assertEqual(status["state"], "running")
+            self.assertFalse((task_dir / "result.json").exists())
+            self.assertFalse(artifact_path.exists())
 
-        hook_process.kill()
-        hook_process.wait(timeout=5)
-        assert hook_process.stdout is not None
-        assert hook_process.stderr is not None
-        hook_process.stdout.close()
-        hook_process.stderr.close()
-        self.assertEqual(self.user_prompt_hook_call(), {"continue": True})
-        wait = json.loads((task_dir / "wait.json").read_text(encoding="utf-8"))
-        self.assertEqual(wait["state"], "disarmed")
-        self.assertEqual(wait["disarm_reason"], "user prompt interrupted wait")
+            release_path.write_text("ready", encoding="utf-8")
+            deadline = time.monotonic() + 5
+            while not (task_dir / "result.json").exists():
+                if time.monotonic() >= deadline:
+                    self.fail("detached worker did not finish after release")
+                time.sleep(0.01)
+            result = json.loads((task_dir / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["exit_code"], 0)
+            self.assertFalse(result["cancelled"])
+            self.assertFalse(result["timed_out"])
+            self.assertIsNone(result["error"])
+            log_path = task_dir / "output.log"
+            self.assertEqual(Path(result["log_path"]), log_path)
+            self.assertEqual(log_path.read_text(encoding="utf-8"), "worker started\nworker finished\n")
+            self.assertEqual(artifact_path.read_text(encoding="utf-8"), "original result")
+            inspected = json.loads(
+                run(
+                    sys.executable, str(self.defer), "inspect", "--task-dir", str(task_dir),
+                    env=self.environment,
+                ).stdout
+            )
+            self.assertEqual(inspected["result"], result)
+            self.assertEqual(inspected["status"]["worker_pid"], worker_pid)
+            self.assertEqual(inspected["status"]["state"], "completed")
+            self.assertEqual(self.hook_call(), {"continue": True})
+            self.assertEqual(self.hook_call(continuing=True), {"continue": True})
+            self.assertFalse((task_dir / "wake.json").exists())
+            self.assertEqual(json.loads((task_dir / "result.json").read_text(encoding="utf-8")), result)
+        finally:
+            try:
+                if hook_process is not None:
+                    try:
+                        if hook_process.poll() is None:
+                            hook_process.kill()
+                        hook_process.wait(timeout=5)
+                    finally:
+                        for stream in (hook_process.stdin, hook_process.stdout, hook_process.stderr):
+                            if stream is not None:
+                                stream.close()
+            finally:
+                if not (task_dir / "result.json").exists():
+                    run(
+                        sys.executable, str(self.defer), "cancel", "--task-dir", str(task_dir),
+                        env=self.environment,
+                    )
 
-        run(sys.executable, str(self.defer), "cancel", "--task-dir", str(task_dir), env=self.environment)
         self.acknowledge_and_clean(task_dir)
 
     def test_keepalive_can_be_disabled_and_rearmed(self) -> None:

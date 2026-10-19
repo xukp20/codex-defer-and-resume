@@ -10,8 +10,9 @@ Use the bundled runner as a service-independent completion primitive. Decide whi
 ## Choose a waiting mode
 
 - Run ordinary foreground commands expected to finish within about ten minutes.
-- Use same-task deferral for longer or unpredictable work when retaining the current task is valuable.
-- Use `start --no-hook` when the command should run independently while the conversation continues. It saves the same logs/results but does not arm Stop Hook waiting, keepalive, or completion wakes for that task.
+- Prefer Codex's native background commands (`exec_command` and `write_stdin`, when available) for ordinary background execution. Use this runner when an independent worker and persistent task directories, logs, and results are useful.
+- Use `start --no-hook` when the conversation should continue while the command runs. It saves the same logs/results but does not arm Stop Hook waiting, keepalive, or completion wakes for that task.
+- Use the default Hook-enabled mode when automatic same-task continuation is needed. Its synchronous Stop Hook keeps the Codex turn active while waiting and can delay steer delivery; see [Messages and interruptions](#messages-and-interruptions).
 - Treat the configured cache-keepalive interval as a heuristic, not a provider guarantee. The default Hook interval is 25 minutes and keepalive is enabled by default.
 - Before a wait likely to outlive prompt caching, write a concise checkpoint containing the objective, workspace, branch or commit, background task directory, completed work, and next actions.
 - If the current Codex surface exposes a safe explicit compaction action, compact before a long wait and verify that context usage fell. Do not start a competing app-server or mutate an active task through an unowned connection.
@@ -32,7 +33,7 @@ On Windows PowerShell, resolve the same script from `$env:CODEX_HOME` and run
 it with `python`. The runner accepts an argv array on every platform; use
 `cmd.exe /d /c` only when a Windows batch file or shell syntax requires it.
 
-With the default Hook-enabled start, finish the current turn. Do not poll with model tool calls. Keep Codex Desktop and the current task open so the Stop Hook can wait and resume it.
+With the default Hook-enabled start, finish the assistant response. The Codex turn remains active while the synchronous Stop Hook waits. Do not poll with model tool calls. Keep Codex Desktop and the current task open so the Hook can resume the model.
 
 For background-only execution, add `--no-hook` before `--`:
 
@@ -43,7 +44,9 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" s
 ```
 
 Continue independent work or end the turn normally; this task will not automatically wake Codex.
-Inspect its status/results when needed, or explicitly `arm --task-dir <path>`
+Use `list`, `status`, or `inspect` during a later active turn to query its
+status/results. An idle model does not periodically query the worker on its
+own. Explicitly `arm --task-dir <path>`
 to enable Hook waiting later. Other armed tasks in the same conversation can
 still make the Stop Hook wait; `--no-hook` only applies to the new task.
 
@@ -78,7 +81,7 @@ secrets in event reasons or evidence paths.
 
 ## Handle Hook prompts
 
-For a `Cache keepalive wake` with no actionable new information, do not inspect logs or poll status; immediately finish the turn with the shortest useful response. If an explicit failure, blocker, or request for a decision has already arrived from a worker, handle it instead of mechanically returning to waiting; disarm the obsolete wait before recovery. The same registration remains armed and the Stop Hook automatically re-enters local waiting on the continuation turn; do not call `start` again.
+For a `Cache keepalive wake` with no actionable new information, do not inspect logs or poll status; immediately finish the assistant response with the shortest useful text. If an explicit failure, blocker, or request for a decision has already arrived from a worker, handle it instead of mechanically returning to waiting; disarm the obsolete wait before recovery. The same registration remains armed and the Stop Hook automatically re-enters local waiting on the continuation; do not call `start` again.
 
 For an attention or review-deadline wake, the wait is already disarmed and the command may still be running. Handle the reported issue; do not start a duplicate worker or assume cancellation.
 
@@ -112,10 +115,27 @@ For a completion prompt:
    python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" clean --task-dir <path>
    ```
 
-When a user sends a new message or interrupts a waiting turn, the synchronous
-`UserPromptSubmit` Hook disarms the registration before the new prompt is
-processed. It does not cancel the worker. The Stop Hook also disarms stale
-`waiting` state on the next non-continuation invocation as a fallback.
+## Messages and interruptions
+
+Steer input sent during the synchronous Stop Hook can remain queued until the
+Hook returns. `UserPromptSubmit` runs when Codex consumes the input, not as an
+immediate message-arrival callback, so it cannot reliably break that wait.
+Use native background execution or `start --no-hook` when prompt interaction
+is required during the command.
+
+Stopping the waiting turn ends the Hook without cancelling the independent
+worker. When a subsequent user prompt is consumed, `UserPromptSubmit` disarms
+the registration. The Stop Hook also disarms stale `waiting` state on its next
+non-continuation invocation as a fallback. Pending steer input may be cleared
+by interruption; resend any message that was not processed.
+
+To release waiting without interrupting the turn, run `disarm --task-dir <path>`
+from a separate terminal or another active context, using the waiting task's
+`CODEX_HOME` and any `CODEX_DEFER_RUNTIME` override. Disarm every registration
+that is still keeping that conversation waiting. The worker continues, and
+already queued steer can then be consumed. After disarming, query results
+explicitly or run `arm` if automatic waiting and continuation are needed again.
+Use `cancel` to stop the worker itself.
 
 ## Operations
 
@@ -146,7 +166,7 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" g
 - Do not place secrets in command arguments. Persistent metadata omits full arguments, but the operating system may expose them while the command runs.
 - Treat process exit as command completion, not proof that the wider workflow succeeded.
 - The runner accepts an argv array and executes it directly; it is not Bash-only. Use an explicit `bash -lc '...'` argv when shell syntax is genuinely required.
-- A user interruption disarms the wait registration but does not cancel the worker. Run `arm` to wait again or `cancel` to stop it. For `--no-hook` tasks, only arm when automatic waiting/wakeup is desired.
+- Stopping a waiting turn does not cancel the worker; the next consumed user prompt or non-continuation Stop Hook disarms the wait. Run `arm` to wait again or `cancel` to stop it. For `--no-hook` tasks, only arm when automatic waiting/wakeup is desired.
 - Override the keepalive interval with `CODEX_DEFER_KEEPALIVE_SECONDS` only when provider evidence justifies it. Leave a safety margin below the measured cache horizon.
 - A missing worker produces exit code `125`, a command timeout `124`, and cancellation `130`.
 - Do not force-clean incomplete state unless recovery is intentionally abandoned.
@@ -159,4 +179,4 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" g
 
 - `scripts/defer.py`: start, inspect, list, status, cancel, acknowledge, clean, and garbage-collect generic tasks.
 - `scripts/stop_hook.py`: wait for current-task registrations, issue periodic cache keepalives, detect stale workers, and deliver one-shot completion wakes.
-- `scripts/user_prompt_hook.py`: disarm active waits when a new user prompt arrives, without cancelling workers.
+- `scripts/user_prompt_hook.py`: disarm active waits when Codex consumes a user prompt, without cancelling workers.
