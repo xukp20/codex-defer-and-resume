@@ -17,6 +17,25 @@ Use the bundled runner as a service-independent completion primitive. Decide whi
 - Before a wait likely to outlive prompt caching, write a concise checkpoint containing the objective, workspace, branch or commit, background task directory, completed work, and next actions.
 - If the current Codex surface exposes a safe explicit compaction action, compact before a long wait and verify that context usage fell. Do not start a competing app-server or mutate an active task through an unowned connection.
 
+## Ownership and subagents
+
+Keep one agent responsible for the command handle, result checks, and cleanup.
+Record the owning thread and native session ID or deferred `task_dir`; returning
+a handle does not mean the command is complete. A deferred registration belongs
+to its starting thread, and `arm` does not transfer it to the calling thread.
+
+For an authorized subagent workflow, prefer an execution subagent retaining its
+native command session while the lead continues independent work. Collect its
+result before the lead finishes; a completion notification does not guarantee
+that an idle lead starts another turn. To start later result handling in an
+idle subagent, use the native follow-up task tool (`followup_task` when
+available); a message or saved handle alone does not schedule that work.
+
+The installer registers `Stop`, not `SubagentStop`: do not assume the default
+Hook continues subagents. Use native background commands or `start --no-hook`
+for delegated execution, with explicit later inspection and cleanup. Do not
+have individual subagents change shared Hooks to arrange their own wakeups.
+
 ## Start and pause
 
 Register a command that stays alive until the desired condition is terminal:

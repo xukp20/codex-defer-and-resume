@@ -42,6 +42,25 @@ it is not an immediate message-arrival callback. See
 [Messages and interruptions](#messages-and-interruptions) before using this
 mode in a conversation that needs prompt interaction.
 
+## Ownership and subagents
+
+Keep one agent responsible for each command's handle, result checks, and
+cleanup. A native command's session ID or a deferred command's `task_dir` is
+a running-work handle, not a completion report. Record the owning thread with
+the handle: deferred registrations belong to the thread that started them.
+`arm` does not transfer a registration to the calling thread.
+
+For an authorized subagent workflow, let the execution subagent retain its
+native command session while the lead continues independent work. The lead
+collects the result before finishing; do not assume a completion notification
+will restart an idle lead. If a subagent has already finished its turn, use
+the client's native follow-up task control to start later result handling.
+
+The installer registers `Stop`, not `SubagentStop`. Do not assume the default
+Hook will continue a subagent, or let individual subagents rewrite shared
+Hooks. Use native background commands or `start --no-hook` for delegated work;
+the latter needs an active agent to inspect and finish it later.
+
 ## Requirements
 
 - Codex Desktop or another Codex surface that supports Stop Hooks
