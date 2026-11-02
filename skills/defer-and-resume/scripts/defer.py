@@ -48,7 +48,7 @@ def runtime_root() -> Path:
     override = os.environ.get("CODEX_DEFER_RUNTIME", "").strip()
     if override:
         return Path(override).expanduser().resolve()
-    return codex_home() / "runtime" / "defer-and-resume"
+    return (codex_home().parent / ".cache" / "codex-defer-and-resume").resolve()
 
 
 def write_json_atomic(path: Path, value: dict[str, Any]) -> None:

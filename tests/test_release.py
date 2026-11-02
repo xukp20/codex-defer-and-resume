@@ -320,7 +320,7 @@ class DeferredRuntimeTests(unittest.TestCase):
         run(sys.executable, str(self.defer), "clean", "--task-dir", str(task_dir), env=self.environment)
 
     def test_gc_collects_completed_state_without_ack(self) -> None:
-        task_dir = self.codex_home / "runtime" / "defer-and-resume" / "test-thread" / "gc-task"
+        task_dir = self.codex_home.parent / ".cache" / "codex-defer-and-resume" / "test-thread" / "gc-task"
         task_dir.mkdir(parents=True)
         (task_dir / "metadata.json").write_text(
             json.dumps({"registered_at": "2000-01-01T00:00:00+00:00"}),
@@ -342,7 +342,7 @@ class DeferredRuntimeTests(unittest.TestCase):
         self.assertFalse(task_dir.exists())
 
     def test_ack_runs_default_gc_and_keeps_current_task(self) -> None:
-        old_task = self.codex_home / "runtime" / "defer-and-resume" / "old-thread" / "gc-task"
+        old_task = self.codex_home.parent / ".cache" / "codex-defer-and-resume" / "old-thread" / "gc-task"
         old_task.mkdir(parents=True)
         (old_task / "metadata.json").write_text(
             json.dumps({"registered_at": "2000-01-01T00:00:00+00:00"}),

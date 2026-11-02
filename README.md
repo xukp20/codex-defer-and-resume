@@ -173,7 +173,7 @@ Environment variables are read by the runner or Stop Hook:
 | Variable | Default | Purpose |
 |---|---:|---|
 | `CODEX_HOME` | `~/.codex` | Codex configuration and runtime root |
-| `CODEX_DEFER_RUNTIME` | `$CODEX_HOME/runtime/defer-and-resume` | Override task-state storage |
+| `CODEX_DEFER_RUNTIME` | `<CODEX_HOME parent>/.cache/codex-defer-and-resume` | Override task-state storage |
 | `CODEX_DEFER_KEEPALIVE_ENABLED` | `true` | Emit continuation turns while work is still running; set to `false` to wait once and disarm when the local Hook window expires |
 | `CODEX_DEFER_KEEPALIVE_SECONDS` | `1500` | Maximum local wait before a cache-keepalive wake |
 | `CODEX_DEFER_POLL_SECONDS` | `0.5` | Local filesystem polling interval |

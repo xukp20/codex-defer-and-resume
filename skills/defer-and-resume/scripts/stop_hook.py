@@ -92,7 +92,7 @@ def runtime_root() -> Path:
     override = os.environ.get("CODEX_DEFER_RUNTIME", "").strip()
     if override:
         return Path(override).expanduser().resolve()
-    return codex_home() / "runtime" / "defer-and-resume"
+    return (codex_home().parent / ".cache" / "codex-defer-and-resume").resolve()
 
 
 def current_thread(hook_input: dict[str, Any]) -> str:
@@ -329,7 +329,7 @@ def emit_notifications(notifications: list[tuple[Path, dict[str, Any] | None, li
         )
         name = metadata.get("name", task.name)
         if result is not None:
-            summaries.append(f"{name} completed with exit code {result.get('exit_code')}; task directory: {task}")
+            summaries.append(f"{name} process finished with exit code {result.get('exit_code')}; runtime logs: {task.resolve()}")
         for event in events:
             summaries.append(f"{name}: action required: {event['reason']}; event ID: {event['event_id']}; "
                              f"evidence path: {event.get('evidence_path')}; task directory: {task}")
@@ -340,7 +340,7 @@ def emit_notifications(notifications: list[tuple[Path, dict[str, Any] | None, li
         emit({"continue": True})
         return
     if has_completion:
-        instructions.append("Deferred work has completed. Read result.json and only the necessary portion of output.log, then continue the original task.")
+        instructions.append("Deferred work has completed (process finished; outcome not yet verified). Read result.json and the relevant output.log excerpt, check the requested result, then continue the original task. Report the outcome and next action concisely in the user’s language; do not equate exit code 0 with verified saved data or experiments. Runtime logs are temporary, not archived project artifacts.")
     if has_attention:
         instructions.append("Action required: handle the attention signal or review the wait deadline. Workers are not cancelled.")
     instructions.append("The notified registrations are disarmed. Run defer.py arm --task-dir <path> explicitly to wait again; cleanup is optional.")
@@ -376,7 +376,7 @@ def emit_keepalive(tasks: list[Path]) -> None:
             + ". If you have already received an actionable subagent failure, blocked, or decision "
             + "message, disarm the affected wait and handle it now. Otherwise, do not poll, inspect "
             + "logs, or call status commands; end this turn immediately with the shortest useful "
-            + "response. The same deferred registration will automatically "
+            + "response, without repeating paths or the unchanged plan. This is a keepalive, not a failure or a request for user action. The same deferred registration will automatically "
             + "re-enter local waiting on the continuation turn.",
         }
     )

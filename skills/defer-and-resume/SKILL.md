@@ -199,3 +199,9 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/defer-and-resume/scripts/defer.py" g
 - `scripts/defer.py`: start, inspect, list, status, cancel, acknowledge, clean, and garbage-collect generic tasks.
 - `scripts/stop_hook.py`: wait for current-task registrations, issue periodic cache keepalives, detect stale workers, and deliver one-shot completion wakes.
 - `scripts/user_prompt_hook.py`: disarm active waits when Codex consumes a user prompt, without cancelling workers.
+
+## Runtime paths and user-facing updates
+
+Resolve the runtime directory before displaying it. The default is `<CODEX_HOME parent>/.cache/codex-defer-and-resume`, outside Codex state. Old runtime paths are not retained; use the task path returned by the tool. Respect `CODEX_DEFER_RUNTIME` when set. Runtime logs and wait records are disposable on configured hosts; important experimental output must be written to the project's own saved location.
+
+When starting work, describe what is running and what its result will decide. Do not repeat opaque task IDs or full runtime paths unless the user needs troubleshooting. A keepalive with no new finding needs at most a brief waiting acknowledgement. At completion, verify the actual requested outcome, then report the finding, its limitation, and next action in the user's language. A zero process exit is not proof that every internal backup or experiment succeeded. For failure, explain the concrete cause and whether useful work survived; avoid repeatedly announcing generic retries.
